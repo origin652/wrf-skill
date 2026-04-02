@@ -1,0 +1,330 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WRF simulation specification",
+  "type": "object",
+  "required": [
+    "project_name",
+    "data_source",
+    "domains"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 2
+    },
+    "project_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "data_source": {
+      "type": "string",
+      "enum": [
+        "gfs",
+        "era5",
+        "fnl"
+      ]
+    },
+    "start_time": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+    },
+    "end_time": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+    },
+    "run_mode": {
+      "type": "string",
+      "enum": [
+        "local",
+        "hpc"
+      ]
+    },
+    "timing": {
+      "type": "object",
+      "required": [
+        "start_time",
+        "end_time"
+      ],
+      "properties": {
+        "start_time": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+        },
+        "end_time": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+        },
+        "forcing_interval_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "history_interval_minutes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "frames_per_outfile": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "restart": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "execution": {
+      "type": "object",
+      "properties": {
+        "run_mode": {
+          "type": "string",
+          "enum": [
+            "local",
+            "hpc"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "domains": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "parent_id",
+          "parent_grid_ratio",
+          "dx_km",
+          "dy_km",
+          "e_we",
+          "e_sn",
+          "i_parent_start",
+          "j_parent_start"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "preset_name": {
+            "type": "string"
+          },
+          "parent_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "parent_grid_ratio": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "dx_km": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "dy_km": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "e_we": {
+            "type": "integer",
+            "minimum": 3
+          },
+          "e_sn": {
+            "type": "integer",
+            "minimum": 3
+          },
+          "i_parent_start": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "j_parent_start": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "ref_lat": {
+            "type": "number"
+          },
+          "ref_lon": {
+            "type": "number"
+          },
+          "geog_data_res": {
+            "type": "string"
+          },
+          "physics": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "physics": {
+      "type": "object",
+      "properties": {
+        "mp_physics": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cu_physics": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ra_lw_physics": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ra_sw_physics": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bl_pbl_physics": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sf_sfclay_physics": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sf_surface_physics": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": {
+        "type": "integer"
+      }
+    },
+    "wps": {
+      "type": "object",
+      "properties": {
+        "share": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "geogrid": {
+          "type": "object",
+          "properties": {
+            "map_proj": {
+              "type": "string",
+              "enum": [
+                "lambert",
+                "mercator",
+                "polar"
+              ]
+            },
+            "ref_lat": {
+              "type": "number"
+            },
+            "ref_lon": {
+              "type": "number"
+            },
+            "truelat1": {
+              "type": "number"
+            },
+            "truelat2": {
+              "type": "number"
+            },
+            "stand_lon": {
+              "type": "number"
+            },
+            "ref_x": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "ref_y": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pole_lat": {
+              "type": "number"
+            },
+            "pole_lon": {
+              "type": "number"
+            },
+            "geog_data_res": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "ungrib": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "metgrid": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "model": {
+      "type": "object",
+      "properties": {
+        "namelist_input": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "experimental": {
+      "type": "object",
+      "properties": {
+        "raw_namelist_input": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "raw_namelist_wps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "anyOf": [
+    {
+      "required": [
+        "timing"
+      ]
+    },
+    {
+      "required": [
+        "start_time",
+        "end_time"
+      ]
+    }
+  ],
+  "allOf": [
+    {
+      "anyOf": [
+        {
+          "required": [
+            "execution"
+          ]
+        },
+        {
+          "required": [
+            "run_mode"
+          ]
+        }
+      ]
+    }
+  ],
+  "additionalProperties": true
+}

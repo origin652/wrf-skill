@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+env/
+runs/*
+!runs/.gitkeep
+
+config/wrf_env.json
+config/wrf_env.local*.json
+config/wrf_env.lowres.json
+third_party/WPS_GEOG/
+third_party/dist/
+third_party/wps-install/
+third_party/wrf-install/

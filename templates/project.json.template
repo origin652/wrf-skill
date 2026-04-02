@@ -1,0 +1,37 @@
+{
+  "project_name": "__PROJECT_NAME__",
+  "platform": "wsl",
+  "status": "created",
+  "current_step": "wrf-init",
+  "paths": {
+    "project_root": "runs/__PROJECT_NAME__",
+    "data_dir": "runs/__PROJECT_NAME__/data",
+    "wps_dir": "runs/__PROJECT_NAME__/wps",
+    "wrf_dir": "runs/__PROJECT_NAME__/wrf",
+    "output_dir": "runs/__PROJECT_NAME__/output",
+    "log_dir": "runs/__PROJECT_NAME__/logs"
+  },
+  "artifacts": {
+    "namelist_wps": null,
+    "namelist_input": null,
+    "data_manifest": null,
+    "forcing_files": [],
+    "met_em_files": [],
+    "wrfinput_files": [],
+    "wrfout_files": [],
+    "plots": []
+  },
+  "data_source": {
+    "type": "gfs",
+    "start_time": null,
+    "end_time": null,
+    "interval_hours": 3
+  },
+  "execution": {
+    "mode": "local",
+    "dry_run": false,
+    "job_id": null
+  },
+  "last_error": null,
+  "updated_at": "__UPDATED_AT__"
+}

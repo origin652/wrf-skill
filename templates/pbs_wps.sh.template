@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#PBS -N {project_name}-wps
+#PBS -q {partition}
+#PBS -A {account}
+#PBS -l select={nodes}:ncpus={tasks_per_node}
+#PBS -l walltime={walltime_hours}:00:00
+#PBS -o {remote_log_dir}/pbs.out
+#PBS -e {remote_log_dir}/pbs.err
+
+set -euo pipefail
+
+mkdir -p "{remote_log_dir}"
+cd "{remote_work_dir}"
+
+{module_load_block}
+{activate_block}
+
+MAIN_LOG="{remote_log_dir}/wrf-wps.log"
+printf 'wrf-wps project=%s\n' "{project_name}" > "$MAIN_LOG"
+printf 'work_dir=%s\n' "{remote_work_dir}" >> "$MAIN_LOG"
+
+printf 'step=geogrid\n' >> "$MAIN_LOG"
+{geogrid_cmd} > "{remote_log_dir}/wrf-wps-geogrid.log" 2>&1
+printf 'step=link_grib\n' >> "$MAIN_LOG"
+{link_grib_cmd} > "{remote_log_dir}/wrf-wps-link-grib.log" 2>&1
+printf 'step=ungrib\n' >> "$MAIN_LOG"
+{ungrib_cmd} > "{remote_log_dir}/wrf-wps-ungrib.log" 2>&1
+printf 'step=metgrid\n' >> "$MAIN_LOG"
+{metgrid_cmd} > "{remote_log_dir}/wrf-wps-metgrid.log" 2>&1
+printf 'status=completed\n' >> "$MAIN_LOG"

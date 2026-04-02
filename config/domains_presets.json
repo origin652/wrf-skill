@@ -1,0 +1,48 @@
+{
+  "east_china": {
+    "description": "Broad East China setup for synoptic to mesoscale runs.",
+    "aliases": [
+      "east china",
+      "华东",
+      "华东地区"
+    ],
+    "ref_lat": 31.2,
+    "ref_lon": 121.5,
+    "default_dx_km": 27,
+    "default_dy_km": 27,
+    "default_e_we": 160,
+    "default_e_sn": 120,
+    "recommended_nests": 2
+  },
+  "south_china": {
+    "description": "South China setup for typhoon and warm-season convection studies.",
+    "aliases": [
+      "south china",
+      "华南",
+      "华南地区"
+    ],
+    "ref_lat": 23.1,
+    "ref_lon": 113.3,
+    "default_dx_km": 27,
+    "default_dy_km": 27,
+    "default_e_we": 150,
+    "default_e_sn": 130,
+    "recommended_nests": 2
+  },
+  "shanghai_inner": {
+    "description": "Fine-resolution inner domain around Shanghai.",
+    "aliases": [
+      "shanghai",
+      "上海",
+      "上海内区",
+      "上海精细区"
+    ],
+    "ref_lat": 31.2,
+    "ref_lon": 121.5,
+    "default_dx_km": 9,
+    "default_dy_km": 9,
+    "default_e_we": 181,
+    "default_e_sn": 181,
+    "recommended_nests": 1
+  }
+}

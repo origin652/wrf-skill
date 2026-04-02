@@ -1,0 +1,67 @@
+{
+  "tropical_cyclone": {
+    "description": "Baseline tropical cyclone setup for a nested mesoscale run.",
+    "aliases": [
+      "typhoon",
+      "tropical cyclone",
+      "台风",
+      "热带气旋"
+    ],
+    "recommended_for": [
+      "typhoon",
+      "landfall",
+      "strong wind",
+      "台风",
+      "登陆"
+    ],
+    "physics": {
+      "mp_physics": 6,
+      "cu_physics": 1,
+      "ra_lw_physics": 4,
+      "ra_sw_physics": 4,
+      "bl_pbl_physics": 1
+    }
+  },
+  "deep_convection": {
+    "description": "Deep convection oriented setup with explicit convection on fine grids.",
+    "aliases": [
+      "deep convection",
+      "severe convection",
+      "强对流"
+    ],
+    "recommended_for": [
+      "severe convection",
+      "short-range convective forecast",
+      "强对流",
+      "短临"
+    ],
+    "physics": {
+      "mp_physics": 8,
+      "cu_physics": 0,
+      "ra_lw_physics": 4,
+      "ra_sw_physics": 4,
+      "bl_pbl_physics": 2
+    }
+  },
+  "regional_climate": {
+    "description": "Regional climate style configuration for long windows and coarser spacing.",
+    "aliases": [
+      "regional climate",
+      "climate",
+      "区域气候"
+    ],
+    "recommended_for": [
+      "regional climate",
+      "seasonal baseline",
+      "区域气候",
+      "气候"
+    ],
+    "physics": {
+      "mp_physics": 6,
+      "cu_physics": 6,
+      "ra_lw_physics": 4,
+      "ra_sw_physics": 4,
+      "bl_pbl_physics": 1
+    }
+  }
+}

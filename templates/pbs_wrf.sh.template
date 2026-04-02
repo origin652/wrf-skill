@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#PBS -N {project_name}
+#PBS -q {partition}
+#PBS -A {account}
+#PBS -l select={nodes}:ncpus={tasks_per_node}
+#PBS -l walltime={walltime_hours}:00:00
+#PBS -o {remote_log_dir}/pbs.out
+#PBS -e {remote_log_dir}/pbs.err
+
+set -euo pipefail
+
+mkdir -p "{remote_project_dir}/output" "{remote_log_dir}"
+cd "{remote_project_dir}/wrf"
+
+{module_load_block}
+{activate_block}
+
+{real_cmd}
+{wrf_cmd}
+cp -f wrfout_d* "{remote_project_dir}/output/" 2>/dev/null || true
+cp -f rsl.* "{remote_log_dir}/" 2>/dev/null || true

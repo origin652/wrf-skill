@@ -1,0 +1,88 @@
+{
+  "platform": "linux",
+  "shell": "bash",
+  "wrf_dir": "/opt/wrf",
+  "wps_dir": "/opt/wps",
+  "geog_data_path": "/data/WPS_GEOG",
+  "run_mode": "local",
+  "local": {
+    "mpi_cmd": "mpirun",
+    "default_np": 8
+  },
+  "hpc": {
+    "enabled": true,
+    "remote_host": "login.cluster.example",
+    "remote_base_dir": "/scratch/user/wrf_runs",
+    "backend": "slurm",
+    "partition": "normal",
+    "account": "myproject",
+    "max_nodes": 4,
+    "cores_per_node": 32,
+    "submit_cmd": "sbatch",
+    "status_cmd": "squeue -j {job_id}",
+    "cancel_cmd": "scancel {job_id}",
+    "runtime": {
+      "mode": "remote_run_dir",
+      "setup_commands": [
+        "source /etc/profile",
+        "module purge"
+      ],
+      "modules": [
+        "wrf/4.7.1"
+      ],
+      "python_env": null,
+      "launcher_cmd": "mpiexec",
+      "tasks_flag": "-n",
+      "remote_run_dir": "$WRF_HOME/run"
+    },
+    "wps_runtime": {
+      "mode": "remote_wps_dir",
+      "setup_commands": [
+        "source /etc/profile",
+        "module purge"
+      ],
+      "modules": [
+        "wps/4.7.1"
+      ],
+      "python_env": null,
+      "remote_wps_dir": "$WPS_HOME"
+    },
+    "limits": {
+      "max_nodes": 4,
+      "max_total_tasks": 128,
+      "max_forecast_hours": 72,
+      "max_domains": 3,
+      "max_total_grid_points": 400000,
+      "max_walltime_hours": 24
+    },
+    "probes": {
+      "cluster_state_cmd": [
+        "builtin:slurm_cluster_probe",
+        "--partition",
+        "{partition}"
+      ],
+      "account_state_cmd": [
+        "builtin:slurm_account_probe",
+        "--account",
+        "{account}",
+        "--partition",
+        "{partition}"
+      ]
+    },
+    "access_mode": "ssh",
+    "scheduler_host": null,
+    "scheduler_ssh_cmd": "ssh"
+  },
+  "notifications": {
+    "command": null
+  },
+  "python_env": "wrf-env",
+  "wrf_run_dir": "/opt/wrf/run",
+  "wps_bin_dir": "/opt/wps/bin",
+  "wps_tables": {
+    "geogrid": "/opt/wps-support/GEOGRID.TBL.ARW",
+    "metgrid": "/opt/wps-support/METGRID.TBL.ARW",
+    "vtable": "/opt/wps-support/Vtable.GFS"
+  },
+  "geog_data_res": "default"
+}

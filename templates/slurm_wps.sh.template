@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#SBATCH --job-name={project_name}-wps
+#SBATCH --partition={partition}
+#SBATCH --account={account}
+#SBATCH --nodes={nodes}
+#SBATCH --ntasks-per-node={tasks_per_node}
+#SBATCH --time={walltime_hours}:00:00
+#SBATCH --output={remote_log_dir}/slurm-%j.out
+#SBATCH --error={remote_log_dir}/slurm-%j.err
+
+set -euo pipefail
+
+mkdir -p "{remote_log_dir}"
+cd "{remote_work_dir}"
+
+{module_load_block}
+{activate_block}
+
+MAIN_LOG="{remote_log_dir}/wrf-wps.log"
+printf 'wrf-wps project=%s\n' "{project_name}" > "$MAIN_LOG"
+printf 'work_dir=%s\n' "{remote_work_dir}" >> "$MAIN_LOG"
+
+printf 'step=geogrid\n' >> "$MAIN_LOG"
+{geogrid_cmd} > "{remote_log_dir}/wrf-wps-geogrid.log" 2>&1
+printf 'step=link_grib\n' >> "$MAIN_LOG"
+{link_grib_cmd} > "{remote_log_dir}/wrf-wps-link-grib.log" 2>&1
+printf 'step=ungrib\n' >> "$MAIN_LOG"
+{ungrib_cmd} > "{remote_log_dir}/wrf-wps-ungrib.log" 2>&1
+printf 'step=metgrid\n' >> "$MAIN_LOG"
+{metgrid_cmd} > "{remote_log_dir}/wrf-wps-metgrid.log" 2>&1
+printf 'status=completed\n' >> "$MAIN_LOG"
