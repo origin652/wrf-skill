@@ -14,3 +14,4 @@ third_party/WPS_GEOG/
 third_party/dist/
 third_party/wps-install/
 third_party/wrf-install/
+dist/
