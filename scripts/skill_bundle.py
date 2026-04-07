@@ -36,7 +36,9 @@ INSTALL_NOTES_TEMPLATE = """WRF skill bundle install
    python3 scripts/install_skill_bundle.py --target /path/to/wrf-skill-bundle
 
 3. For Codex, this bundle also installs the native plugin files under plugins/wrf-skill/ and .agents/plugins/marketplace.json.
-4. If you need HPC mode, copy config/wrf_env.hpc.example.json to config/wrf_env.json and fill in cluster-specific values.
+4. To register the plugin globally for Codex and deploy a compatible workspace, run: `bash scripts/install_codex_plugin.sh`
+5. The default workspace path is `~/codex-workspaces/wrf-skill-workspace`, and the script prints an AI handoff block with the ready path.
+6. If you need HPC mode, copy config/wrf_env.hpc.example.json to config/wrf_env.json and fill in cluster-specific values.
 
 The bundle intentionally excludes private configs, runs/, WPS_GEOG, and compiled artifacts.
 """

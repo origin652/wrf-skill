@@ -107,6 +107,36 @@ python3 scripts/install_skill_bundle.py --target /path/to/codex-workspace
 - `templates/`
 - `runs/`
 
+### 方式三：全局注册 plugin，并顺手部署好 Codex 工作区
+
+```bash
+bash scripts/install_codex_plugin.sh
+```
+
+默认会一次性做完这几件事：
+
+- 把 plugin 安装到 `~/plugins/wrf-skill`
+- 更新 `~/.agents/plugins/marketplace.json`
+- 把兼容工作区部署到 `~/codex-workspaces/wrf-skill-workspace`
+- 输出一段 `AI handoff`，明确告诉你工作区已经就绪，以及路径在哪里
+
+如果你要改默认位置，可以这样：
+
+```bash
+bash scripts/install_codex_plugin.sh \
+  --plugins-dir /path/to/plugins \
+  --marketplace-path /path/to/marketplace.json \
+  --workspace-root /path/to/wrf-skill-workspace
+```
+
+如果你只想全局注册 plugin，不想顺手复制工作区，可以这样：
+
+```bash
+bash scripts/install_codex_plugin.sh --no-workspace
+```
+
+只要脚本部署了工作区，后面真正跑 WRF 时，就直接在 Codex 里打开那个部署好的路径。
+
 实际可用的说法类似：
 
 - `用 scripts/wrf_init.py 初始化一个 demo 项目。`

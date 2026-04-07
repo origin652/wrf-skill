@@ -101,6 +101,36 @@ The plugin is intentionally thin. It expects the same workspace to still contain
 - `templates/`
 - `runs/`
 
+### Option C: register the plugin globally for Codex and deploy a workspace
+
+```bash
+bash scripts/install_codex_plugin.sh
+```
+
+By default this does all of the following:
+
+- installs the plugin to `~/plugins/wrf-skill`
+- updates `~/.agents/plugins/marketplace.json`
+- deploys a compatible workspace to `~/codex-workspaces/wrf-skill-workspace`
+- prints an `AI handoff` block telling you the workspace is ready and where it lives
+
+If you need non-default locations, use:
+
+```bash
+bash scripts/install_codex_plugin.sh \
+  --plugins-dir /path/to/plugins \
+  --marketplace-path /path/to/marketplace.json \
+  --workspace-root /path/to/wrf-skill-workspace
+```
+
+If you only want the global plugin registration and do not want a workspace copy, use:
+
+```bash
+bash scripts/install_codex_plugin.sh --no-workspace
+```
+
+When you do deploy a workspace, open that deployed path in Codex for actual WRF work.
+
 After that, tell Codex which WRF step you want it to operate.
 Practical examples:
 
