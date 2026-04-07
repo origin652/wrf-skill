@@ -71,8 +71,8 @@ Use `--force` only if you intentionally want to overwrite bundled files already 
 
 ## Deploy to Codex
 
-This repository does not currently ship a native Codex plugin or `.codex/skills` package.
-For Codex, deployment means giving Codex a workspace that contains the workflow files, then letting it drive the scripts and configs in that workspace.
+This repository now ships a repo-local native Codex plugin under `plugins/wrf-skill/`.
+It is a thin wrapper around the repository workflow scripts, and `.agents/plugins/marketplace.json` makes it discoverable as a local plugin in this workspace.
 
 ### Option A: use the repository directly
 
@@ -80,6 +80,8 @@ For Codex, deployment means giving Codex a workspace that contains the workflow 
 git clone https://github.com/origin652/wrf-skill.git
 cd wrf-skill
 ```
+
+Open the repository in Codex. The local marketplace file points Codex at `plugins/wrf-skill/`.
 
 ### Option B: install the bundle into a clean workspace
 
@@ -90,7 +92,16 @@ cd wrf-skill-bundle
 python3 scripts/install_skill_bundle.py --target /path/to/codex-workspace
 ```
 
-After that, open the target workspace in Codex and tell it which WRF step you want it to operate.
+After that, open the target workspace in Codex. The bundle includes the native plugin files as well as the workflow scripts, so Codex can use the plugin and still operate directly on workspace state.
+
+The plugin is intentionally thin. It expects the same workspace to still contain:
+
+- `scripts/`
+- `config/`
+- `templates/`
+- `runs/`
+
+After that, tell Codex which WRF step you want it to operate.
 Practical examples:
 
 - `Use scripts/wrf_init.py to create a project called demo.`
@@ -101,7 +112,9 @@ Practical examples:
 
 The bundle is meant for redistribution. It includes the workflow layer only:
 
+- `.agents/plugins/marketplace.json`
 - `.claude/skills/`
+- `plugins/wrf-skill/`
 - `scripts/`
 - `templates/`
 - selected config presets and schema files
@@ -185,7 +198,7 @@ If you only want preprocessing first, stop after `wrf-wps`.
 This repository is best treated as:
 
 - a skill and workflow layer for Claude Code
-- a WRF workflow workspace for Codex
+- a native Codex plugin plus WRF workflow workspace
 - a redistribution-friendly bundle for users who need the same orchestration logic without your private environment
 
 It is not a replacement for a real WRF/WPS installation.

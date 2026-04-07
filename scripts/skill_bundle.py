@@ -11,12 +11,14 @@ BUNDLE_ROOT_NAME = "wrf-skill-bundle"
 BUNDLE_MANIFEST_NAME = "bundle_manifest.json"
 BUNDLE_INSTALL_NOTES = "INSTALL.txt"
 BUNDLE_INCLUDE_PATHS = (
+    ".agents/plugins/marketplace.json",
     ".claude/skills",
     ".gitignore",
     "config/domains_presets.json",
     "config/physics_schemes.json",
     "config/simulation_schema.json",
     "config/wrf_env.hpc.example.json",
+    "plugins/wrf-skill",
     "runs/.gitkeep",
     "scripts",
     "templates",
@@ -33,7 +35,8 @@ INSTALL_NOTES_TEMPLATE = """WRF skill bundle install
 
    python3 scripts/install_skill_bundle.py --target /path/to/wrf-skill-bundle
 
-3. If you need HPC mode, copy config/wrf_env.hpc.example.json to config/wrf_env.json and fill in cluster-specific values.
+3. For Codex, this bundle also installs the native plugin files under plugins/wrf-skill/ and .agents/plugins/marketplace.json.
+4. If you need HPC mode, copy config/wrf_env.hpc.example.json to config/wrf_env.json and fill in cluster-specific values.
 
 The bundle intentionally excludes private configs, runs/, WPS_GEOG, and compiled artifacts.
 """

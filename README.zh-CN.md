@@ -77,10 +77,8 @@ python3 scripts/install_skill_bundle.py --target /path/to/claude-workspace
 
 ## 怎么部署到 Codex
 
-这里要说清楚一个边界：这个仓库现在没有原生的 Codex plugin，也没有 `.codex/skills` 这套包装。
-
-所以对 Codex 来说，“部署”不是“注册一个全局技能”，而是：
-把这套工作流文件放进一个工作区，让 Codex 直接调用里面的脚本、模板、配置和运行状态。
+这个仓库现在已经带了一套 repo-local 的原生 Codex plugin，位置在 `plugins/wrf-skill/`。
+它本质上是一层很薄的封装，下面仍然调用仓库里的工作流脚本，而 `.agents/plugins/marketplace.json` 会把它暴露成当前工作区里的本地 plugin。
 
 ### 方式一：直接用仓库
 
@@ -88,6 +86,8 @@ python3 scripts/install_skill_bundle.py --target /path/to/claude-workspace
 git clone https://github.com/origin652/wrf-skill.git
 cd wrf-skill
 ```
+
+然后直接在 Codex 里打开这个仓库即可。本地 marketplace 已经指向 `plugins/wrf-skill/`。
 
 ### 方式二：把 bundle 安装进一个干净工作区
 
@@ -98,7 +98,14 @@ cd wrf-skill-bundle
 python3 scripts/install_skill_bundle.py --target /path/to/codex-workspace
 ```
 
-之后在 Codex 里打开目标工作区，让它基于这里的脚本工作即可。
+之后在 Codex 里打开目标工作区即可。现在 bundle 里已经会包含原生 plugin 文件和工作流脚本，所以它既能按 plugin 方式发现，也能直接操作工作区状态。
+
+这个 plugin 的边界也要讲清楚，它默认假设同一个工作区里还存在：
+
+- `scripts/`
+- `config/`
+- `templates/`
+- `runs/`
 
 实际可用的说法类似：
 
@@ -112,7 +119,9 @@ bundle 的作用是“把工作流层干净地带走”，不是把你的整个�
 
 它会包含：
 
+- `.agents/plugins/marketplace.json`
 - `.claude/skills/`
+- `plugins/wrf-skill/`
 - `scripts/`
 - `templates/`
 - 必要的 schema 和 preset 配置
@@ -209,7 +218,7 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 把它理解成下面三件事之一，基本就不会用偏：
 
 - Claude Code 的 WRF skill 工作区
-- Codex 可直接操作的 WRF workflow 工作区
+- 原生 Codex plugin 加 WRF workflow 工作区
 - 可以发给别人的 bundle 化工作流层
 
 不要把它理解成：

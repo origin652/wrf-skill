@@ -26,8 +26,20 @@ def make_test_dir(name: str) -> Path:
 
 class SkillBundleTests(unittest.TestCase):
     def create_source_tree(self, root: Path) -> None:
+        (root / ".agents" / "plugins").mkdir(parents=True, exist_ok=True)
+        (root / ".agents" / "plugins" / "marketplace.json").write_text(
+            '{"name":"wrf-skill-local","plugins":[]}\n',
+            encoding="utf-8",
+        )
         (root / ".claude" / "skills" / "wrf").mkdir(parents=True, exist_ok=True)
         (root / ".claude" / "skills" / "wrf" / "SKILL.md").write_text("wrf\n", encoding="utf-8")
+        (root / "plugins" / "wrf-skill" / ".codex-plugin").mkdir(parents=True, exist_ok=True)
+        (root / "plugins" / "wrf-skill" / ".codex-plugin" / "plugin.json").write_text("{}\n", encoding="utf-8")
+        (root / "plugins" / "wrf-skill" / "skills" / "wrf").mkdir(parents=True, exist_ok=True)
+        (root / "plugins" / "wrf-skill" / "skills" / "wrf" / "SKILL.md").write_text(
+            "wrf-plugin\n",
+            encoding="utf-8",
+        )
         (root / "scripts").mkdir(parents=True, exist_ok=True)
         (root / "scripts" / "wrf_task.py").write_text("print('task')\n", encoding="utf-8")
         (root / "scripts" / "install_skill_bundle.py").write_text("print('install')\n", encoding="utf-8")
@@ -60,7 +72,10 @@ class SkillBundleTests(unittest.TestCase):
         manifest = build_bundle_manifest(source_root)
         files = set(manifest["files"])
 
+        self.assertIn(".agents/plugins/marketplace.json", files)
         self.assertIn(".claude/skills/wrf/SKILL.md", files)
+        self.assertIn("plugins/wrf-skill/.codex-plugin/plugin.json", files)
+        self.assertIn("plugins/wrf-skill/skills/wrf/SKILL.md", files)
         self.assertIn("scripts/wrf_task.py", files)
         self.assertIn("config/wrf_env.hpc.example.json", files)
         self.assertIn("third_party/wps-support/Vtable.GFS", files)
@@ -87,7 +102,9 @@ class SkillBundleTests(unittest.TestCase):
         self.assertEqual(install_payload["file_count"], manifest["file_count"])
         self.assertTrue((target_root / BUNDLE_MANIFEST_NAME).exists())
         self.assertTrue((target_root / BUNDLE_INSTALL_NOTES).exists())
+        self.assertTrue((target_root / ".agents" / "plugins" / "marketplace.json").exists())
         self.assertTrue((target_root / ".claude" / "skills" / "wrf" / "SKILL.md").exists())
+        self.assertTrue((target_root / "plugins" / "wrf-skill" / ".codex-plugin" / "plugin.json").exists())
         self.assertTrue((target_root / "scripts" / "wrf_task.py").exists())
         self.assertFalse((target_root / "config" / "wrf_env.json").exists())
         self.assertFalse((target_root / "runs" / "demo" / "project.json").exists())
@@ -111,7 +128,9 @@ class SkillBundleTests(unittest.TestCase):
             names = set(archive.getnames())
         self.assertIn("wrf-skill-bundle/bundle_manifest.json", names)
         self.assertIn("wrf-skill-bundle/INSTALL.txt", names)
+        self.assertIn("wrf-skill-bundle/.agents/plugins/marketplace.json", names)
         self.assertIn("wrf-skill-bundle/.claude/skills/wrf/SKILL.md", names)
+        self.assertIn("wrf-skill-bundle/plugins/wrf-skill/.codex-plugin/plugin.json", names)
         self.assertNotIn("wrf-skill-bundle/config/wrf_env.json", names)
 
         with tempfile.TemporaryDirectory(prefix="wrf-skill-bundle-test-") as tmp_dir:
