@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 from copy import deepcopy
@@ -9,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from namelist_parser import read_namelist
+    from netCDF4 import Dataset
+except ImportError:  # pragma: no cover
+    Dataset = None
+
+try:
+    from namelist_parser import read_namelist, write_namelist
     from project_state import (
         clear_error,
         load_project,
@@ -20,7 +26,7 @@ try:
         transition,
     )
 except ImportError:  # pragma: no cover
-    from .namelist_parser import read_namelist
+    from .namelist_parser import read_namelist, write_namelist
     from .project_state import (
         clear_error,
         load_project,
@@ -94,6 +100,58 @@ def collect_met_em_files(state: dict[str, Any]) -> list[Path]:
     return met_em_files
 
 
+def _read_met_em_vertical_metadata(met_em_path: Path) -> dict[str, int] | None:
+    if Dataset is None:
+        return None
+
+    try:
+        with Dataset(met_em_path) as dataset:
+            num_metgrid_levels = getattr(dataset, "NUM_METGRID_LEVELS", None)
+            if num_metgrid_levels is None:
+                num_metgrid_levels = getattr(dataset, "BOTTOM-TOP_GRID_DIMENSION", None)
+            num_metgrid_soil_levels = getattr(dataset, "NUM_METGRID_SOIL_LEVELS", None)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+    payload: dict[str, int] = {}
+    if num_metgrid_levels is not None:
+        payload["num_metgrid_levels"] = int(num_metgrid_levels)
+    if num_metgrid_soil_levels is not None:
+        payload["num_metgrid_soil_levels"] = int(num_metgrid_soil_levels)
+    return payload or None
+
+
+def sync_namelist_with_met_em(
+    namelist_path: Path,
+    namelist: dict[str, dict[str, Any]],
+    met_em_files: list[Path],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    if not met_em_files:
+        return namelist, {}
+
+    metadata = _read_met_em_vertical_metadata(met_em_files[0])
+    if not metadata:
+        return namelist, {}
+
+    updated = deepcopy(namelist)
+    domains = updated.setdefault("domains", {})
+    adjustments: dict[str, dict[str, Any]] = {}
+    source_path = posix_path(met_em_files[0])
+
+    for key, expected in metadata.items():
+        current = _scalar(domains.get(key))
+        current_value = None if current is None else int(current)
+        if current_value == expected:
+            continue
+        domains[key] = expected
+        adjustments[key] = {"old": current, "new": expected, "source": source_path}
+
+    if adjustments:
+        write_namelist(updated, namelist_path)
+
+    return updated, adjustments
+
+
 
 def expected_wrfinput_paths(work_dir: Path, domain_count: int) -> list[Path]:
     return [work_dir / f"wrfinput_d{index:02d}" for index in range(1, domain_count + 1)]
@@ -156,6 +214,23 @@ def stage_files(files: list[Path], target_dir: Path) -> list[str]:
         staged.append(posix_path(target))
     return staged
 
+
+
+def build_runtime_env(command: list[str]) -> dict[str, str] | None:
+    if not command:
+        return None
+    try:
+        is_root = os.geteuid() == 0
+    except AttributeError:  # pragma: no cover
+        is_root = False
+    launcher = Path(command[0]).name
+    if not is_root or launcher not in {"mpirun", "mpiexec"}:
+        return None
+
+    env = os.environ.copy()
+    env.setdefault("OMPI_ALLOW_RUN_AS_ROOT", "1")
+    env.setdefault("OMPI_ALLOW_RUN_AS_ROOT_CONFIRM", "1")
+    return env
 
 
 def build_commands(work_dir: Path, config: dict[str, Any]) -> tuple[dict[str, list[str]], int]:
@@ -353,8 +428,9 @@ def run_project(
         raise FileNotFoundError(f"Missing namelist.input: {namelist_path}")
 
     namelist = read_namelist(namelist_path)
-    domain_count = detect_domain_count(namelist)
     met_em_files = collect_met_em_files(base_state)
+    namelist, namelist_sync = sync_namelist_with_met_em(namelist_path, namelist, met_em_files)
+    domain_count = detect_domain_count(namelist)
     met_em_inventory = build_inventory(met_em_files)
     expected_inputs = expected_wrfinput_paths(work_dir, domain_count)
     boundary_path = work_dir / "wrfbdy_d01"
@@ -414,6 +490,8 @@ def run_project(
         f"existing_wrfout_count={len(wrfout_files)}",
         f"np={np}",
     ]
+    for key, payload in namelist_sync.items():
+        main_log_lines.append(f"sync_{key}={payload['old']}->{payload['new']} ({payload['source']})")
 
     if wrfout_files:
         state = deepcopy(base_state)
@@ -485,6 +563,7 @@ def run_project(
             capture_output=True,
             text=True,
             check=False,
+            env=build_runtime_env(commands["real"]),
         )
         output = combine_output(completed)
         write_step_log(real_log_path, commands["real"], work_dir, completed.returncode, output)
@@ -524,6 +603,7 @@ def run_project(
         capture_output=True,
         text=True,
         check=False,
+        env=build_runtime_env(commands["wrf"]),
     )
     output = combine_output(completed)
     write_step_log(wrf_log_path, commands["wrf"], work_dir, completed.returncode, output)

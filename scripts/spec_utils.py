@@ -106,10 +106,10 @@ def default_spec(project_name: str = "demo") -> dict[str, Any]:
             },
             "ungrib": {
                 "out_format": "WPS",
-                "prefix": "GFS",
+                "prefix": None,
             },
             "metgrid": {
-                "fg_name": "GFS",
+                "fg_name": None,
                 "io_form_metgrid": 2,
             },
         },

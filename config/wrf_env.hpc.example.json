@@ -82,7 +82,12 @@
   "wps_tables": {
     "geogrid": "/opt/wps-support/GEOGRID.TBL.ARW",
     "metgrid": "/opt/wps-support/METGRID.TBL.ARW",
-    "vtable": "/opt/wps-support/Vtable.GFS"
+    "vtable": "/opt/wps-support/Vtable.GFS",
+    "vtable_by_source": {
+      "gfs": "/opt/wps-support/Vtable.GFS",
+      "fnl": "/opt/wps-support/Vtable.GFS",
+      "era5": "/opt/wps-support/Vtable.ECMWF"
+    }
   },
   "geog_data_res": "default"
 }

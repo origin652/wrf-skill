@@ -409,6 +409,12 @@ def apply_inputs_to_spec(
     if end_time:
         spec["timing"]["end_time"] = end_time
     if data_source:
+        previous_source = str(spec["data_source"]).upper()
+        next_source = str(data_source).upper()
+        if str(spec["wps"]["ungrib"].get("prefix") or "").upper() == previous_source:
+            spec["wps"]["ungrib"]["prefix"] = next_source
+        if str(spec["wps"]["metgrid"].get("fg_name") or "").upper() == previous_source:
+            spec["wps"]["metgrid"]["fg_name"] = next_source
         spec["data_source"] = data_source
     if run_mode:
         spec["execution"]["run_mode"] = run_mode

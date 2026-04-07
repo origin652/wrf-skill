@@ -118,6 +118,29 @@ class WrfConfigTests(unittest.TestCase):
         self.assertEqual(input_namelist["domains"]["max_dom"], 2)
         self.assertEqual(input_namelist["physics"]["cu_physics"], [0, 0])
 
+    def test_configure_project_sets_era5_wps_prefix(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_config_era5_prefix")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_project(runs_dir)
+
+        configure_project(
+            "demo",
+            runs_dir=runs_dir,
+            config_path=CONFIG_PATH,
+            domains_config=DOMAINS_CONFIG,
+            physics_config=PHYSICS_CONFIG,
+            domain_presets=["east_china"],
+            physics_preset="tropical_cyclone",
+            start_time="2024-07-20_00:00:00",
+            end_time="2024-07-20_12:00:00",
+            data_source="era5",
+            dry_run=False,
+        )
+
+        namelist_wps = read_namelist(runs_dir / "demo" / "wps" / "namelist.wps")
+        self.assertEqual(namelist_wps["ungrib"]["prefix"], "ERA5")
+        self.assertEqual(namelist_wps["metgrid"]["fg_name"], "ERA5")
+
     def test_unknown_preset_raises_error(self) -> None:
         runs_dir = make_test_dir("_test_wrf_config_bad_preset")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
@@ -151,9 +174,9 @@ class WrfConfigTests(unittest.TestCase):
 
         spec = payload["simulation_spec"]
         self.assertEqual(spec["data_source"], "gfs")
-        self.assertEqual(spec["run_mode"], "local")
-        self.assertEqual(spec["start_time"], "2024-07-20_00:00:00")
-        self.assertEqual(spec["end_time"], "2024-07-20_12:00:00")
+        self.assertEqual(spec["execution"]["run_mode"], "local")
+        self.assertEqual(spec["timing"]["start_time"], "2024-07-20_00:00:00")
+        self.assertEqual(spec["timing"]["end_time"], "2024-07-20_12:00:00")
         self.assertEqual(len(spec["domains"]), 2)
         self.assertEqual(spec["domains"][0]["preset_name"], "east_china")
         self.assertEqual(spec["domains"][1]["preset_name"], "shanghai_inner")

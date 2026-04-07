@@ -3,7 +3,8 @@ import shutil
 import unittest
 from pathlib import Path
 
-from scripts.download_gfs import build_manifest
+from scripts.download_era5 import build_manifest as build_era5_manifest
+from scripts.download_gfs import build_manifest as build_gfs_manifest
 from scripts.wrf_config import configure_project
 from scripts.wrf_data import prepare_data
 from scripts.wrf_init import initialize_project
@@ -22,15 +23,22 @@ def make_test_dir(name: str) -> Path:
     return target
 
 
-def create_source_tree(source_root: Path, manifest: dict) -> None:
+def create_gfs_source_tree(source_root: Path, manifest: dict) -> None:
     for request in manifest["requests"]:
         target = source_root / request["remote_path"]
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(f"{request['file_name']}\n", encoding="utf-8")
 
 
+def create_era5_source_tree(source_root: Path, manifest: dict) -> None:
+    for request in manifest["requests"]:
+        target = source_root / request["remote_path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"{request['file_name']} {request['kind']}\n", encoding="utf-8")
+
+
 class WrfDataTests(unittest.TestCase):
-    def init_and_configure_project(self, runs_dir: Path) -> None:
+    def init_and_configure_project(self, runs_dir: Path, *, data_source: str = "gfs") -> None:
         initialize_project(
             "demo",
             runs_dir=runs_dir,
@@ -49,6 +57,7 @@ class WrfDataTests(unittest.TestCase):
             physics_preset="tropical_cyclone",
             start_time="2024-07-20_00:00:00",
             end_time="2024-07-20_12:00:00",
+            data_source=data_source,
             dry_run=False,
         )
 
@@ -74,14 +83,14 @@ class WrfDataTests(unittest.TestCase):
         self.init_and_configure_project(runs_dir)
         source_root = runs_dir / "_source"
         source_root.mkdir(parents=True, exist_ok=True)
-        manifest = build_manifest(
+        manifest = build_gfs_manifest(
             start="2024-07-20_00:00:00",
             end="2024-07-20_12:00:00",
             interval_hours=3,
             resolution="0p25",
             base_url=source_root.as_uri(),
         )
-        create_source_tree(source_root, manifest)
+        create_gfs_source_tree(source_root, manifest)
 
         payload = prepare_data(
             "demo",
@@ -124,7 +133,7 @@ class WrfDataTests(unittest.TestCase):
         project_root = runs_dir / "demo"
         data_dir = project_root / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
-        manifest = build_manifest(
+        manifest = build_gfs_manifest(
             start="2024-07-20_00:00:00",
             end="2024-07-20_12:00:00",
             interval_hours=3,
@@ -150,14 +159,14 @@ class WrfDataTests(unittest.TestCase):
 
         source_root = runs_dir / "_source"
         source_root.mkdir(parents=True, exist_ok=True)
-        manifest = build_manifest(
+        manifest = build_gfs_manifest(
             start="2024-07-20_00:00:00",
             end="2024-07-20_12:00:00",
             interval_hours=3,
             resolution="0p25",
             base_url=source_root.as_uri(),
         )
-        create_source_tree(source_root, {"requests": manifest["requests"][:2]})
+        create_gfs_source_tree(source_root, {"requests": manifest["requests"][:2]})
 
         with self.assertRaises(RuntimeError):
             prepare_data(
@@ -173,6 +182,137 @@ class WrfDataTests(unittest.TestCase):
         self.assertEqual(project_json["status"], "failed")
         self.assertEqual(project_json["last_error"]["code"], "DOWNLOAD_INCOMPLETE")
 
+    def test_prepare_data_supports_era5_dry_run(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_data_era5_dry_run")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_and_configure_project(runs_dir, data_source="era5")
+
+        project_json = runs_dir / "demo" / "project.json"
+        before = project_json.read_text(encoding="utf-8")
+
+        payload = prepare_data("demo", runs_dir=runs_dir, dry_run=True)
+
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["manifest"]["source"], "era5")
+        self.assertEqual(payload["manifest"]["transport"], "cdsapi")
+        self.assertGreater(payload["plan"]["missing_count"], 0)
+        self.assertFalse((runs_dir / "demo" / "data" / "data_manifest.json").exists())
+        self.assertEqual(before, project_json.read_text(encoding="utf-8"))
+
+    def test_prepare_data_uses_spec_forcing_interval_by_default(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_data_spec_interval")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_and_configure_project(runs_dir, data_source="era5")
+
+        spec_path = runs_dir / "demo" / "simulation_spec.json"
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        spec["timing"]["forcing_interval_seconds"] = 3600
+        spec_path.write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
+
+        payload = prepare_data("demo", runs_dir=runs_dir, dry_run=True)
+
+        self.assertEqual(payload["manifest"]["interval_hours"], 1)
+        self.assertEqual(payload["project"]["data_source"]["interval_hours"], 1)
+        self.assertEqual(len(payload["manifest"]["requests"]), 2)
+        self.assertEqual({item["kind"] for item in payload["manifest"]["requests"]}, {"pressure", "single"})
+        for request in payload["manifest"]["requests"]:
+            self.assertEqual(len(request["times"]), 13)
+
+    def test_prepare_data_redownloads_when_manifest_changes_for_same_file_name(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_data_manifest_change")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_and_configure_project(runs_dir, data_source="era5")
+
+        project_root = runs_dir / "demo"
+        data_dir = project_root / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        for file_name in ("era5.pressure.20240720.grib", "era5.single.20240720.grib"):
+            (data_dir / file_name).write_text("stale\n", encoding="utf-8")
+
+        stale_manifest = build_era5_manifest(
+            start="2024-07-20_00:00:00",
+            end="2024-07-20_12:00:00",
+            interval_hours=3,
+        )
+        (data_dir / "data_manifest.json").write_text(json.dumps(stale_manifest, indent=2) + "\n", encoding="utf-8")
+
+        spec_path = project_root / "simulation_spec.json"
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        spec["timing"]["forcing_interval_seconds"] = 3600
+        spec_path.write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
+
+        source_root = runs_dir / "_era5_source"
+        source_root.mkdir(parents=True, exist_ok=True)
+        current_manifest = build_era5_manifest(
+            start="2024-07-20_00:00:00",
+            end="2024-07-20_12:00:00",
+            interval_hours=1,
+            base_url=source_root.as_uri(),
+        )
+        create_era5_source_tree(source_root, current_manifest)
+
+        payload = prepare_data(
+            "demo",
+            runs_dir=runs_dir,
+            base_url=source_root.as_uri(),
+            max_workers=1,
+            dry_run=False,
+        )
+
+        written_manifest = json.loads((data_dir / "data_manifest.json").read_text(encoding="utf-8"))
+        download_script = (data_dir / "download_era5.sh").read_text(encoding="utf-8")
+
+        self.assertEqual(payload["download"]["downloaded_count"], 2)
+        self.assertEqual(payload["download"]["skipped_count"], 0)
+        self.assertEqual(written_manifest["interval_hours"], 1)
+        self.assertEqual(len(written_manifest["requests"]), 2)
+        for request in written_manifest["requests"]:
+            self.assertEqual(len(request["times"]), 13)
+        self.assertNotIn("--overwrite", download_script)
+
+    def test_prepare_data_downloads_era5_from_local_mirror(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_data_era5_real")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_and_configure_project(runs_dir, data_source="era5")
+
+        source_root = runs_dir / "_era5_source"
+        source_root.mkdir(parents=True, exist_ok=True)
+        manifest = build_era5_manifest(
+            start="2024-07-20_00:00:00",
+            end="2024-07-20_12:00:00",
+            interval_hours=3,
+            base_url=source_root.as_uri(),
+        )
+        create_era5_source_tree(source_root, manifest)
+
+        payload = prepare_data(
+            "demo",
+            runs_dir=runs_dir,
+            base_url=source_root.as_uri(),
+            max_workers=1,
+            dry_run=False,
+        )
+
+        project_root = runs_dir / "demo"
+        manifest_path = project_root / "data" / "data_manifest.json"
+        download_script = project_root / "data" / "download_era5.sh"
+        log_path = project_root / "logs" / "wrf-data.log"
+        state = json.loads((project_root / "project.json").read_text(encoding="utf-8"))
+        written_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(manifest_path.exists())
+        self.assertTrue(download_script.exists())
+        self.assertTrue(log_path.exists())
+        self.assertEqual(payload["project"]["status"], "data_ready")
+        self.assertEqual(payload["download"]["failed_count"], 0)
+        self.assertEqual(written_manifest["source"], "era5")
+        self.assertEqual(written_manifest["transport"], "url")
+        self.assertEqual(state["status"], "data_ready")
+        self.assertTrue(str(payload["download_script"]).endswith("download_era5.sh"))
+        self.assertEqual(len(written_manifest["requests"]), 2)
+        self.assertTrue((project_root / "data" / "era5.pressure.20240720.grib").exists())
+        self.assertTrue((project_root / "data" / "era5.single.20240720.grib").exists())
+
     def test_unsupported_data_source_raises(self) -> None:
         runs_dir = make_test_dir("_test_wrf_data_source")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
@@ -180,7 +320,7 @@ class WrfDataTests(unittest.TestCase):
 
         spec_path = runs_dir / "demo" / "simulation_spec.json"
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
-        spec["data_source"] = "era5"
+        spec["data_source"] = "fnl"
         spec_path.write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
 
         with self.assertRaises(NotImplementedError):

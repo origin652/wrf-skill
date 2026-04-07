@@ -1,14 +1,18 @@
 import json
+import os
 import shutil
 import stat
 import unittest
 from pathlib import Path
 
+from netCDF4 import Dataset
+
+from scripts.namelist_parser import read_namelist
 from scripts.download_gfs import build_manifest
 from scripts.wrf_config import configure_project
 from scripts.wrf_data import prepare_data
 from scripts.wrf_init import initialize_project
-from scripts.wrf_run import build_commands, run_project, stage_files
+from scripts.wrf_run import build_commands, build_runtime_env, run_project, stage_files
 from scripts.wrf_wps import prepare_wps
 
 TMP_ROOT = Path(__file__).resolve().parents[1] / "runs"
@@ -33,6 +37,15 @@ def create_source_tree(source_root: Path, manifest: dict) -> None:
         target.write_text(f"{request['file_name']}\n", encoding="utf-8")
 
 
+
+
+
+def write_met_em_netcdf(path: Path, *, bottom_top: int, soil_levels: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with Dataset(path, "w", format="NETCDF4") as dataset:
+        dataset.createDimension("Time", 1)
+        dataset.setncattr("BOTTOM-TOP_GRID_DIMENSION", bottom_top)
+        dataset.setncattr("NUM_METGRID_SOIL_LEVELS", soil_levels)
 
 def write_executable(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,6 +118,16 @@ class WrfRunTests(unittest.TestCase):
             commands["wrf"],
             ["mpirun", "-np", "2", str((Path("runs/demo/wrf") / "wrf.exe").resolve())],
         )
+
+    def test_build_runtime_env_allows_openmpi_as_root(self) -> None:
+        env = build_runtime_env(["mpirun", "-np", "8", "/tmp/wrf.exe"])
+
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.assertIsNotNone(env)
+            self.assertEqual(env["OMPI_ALLOW_RUN_AS_ROOT"], "1")
+            self.assertEqual(env["OMPI_ALLOW_RUN_AS_ROOT_CONFIRM"], "1")
+        else:
+            self.assertIsNone(env)
 
     def test_stage_files_preserves_executable_mode(self) -> None:
         runs_dir = make_test_dir("_test_wrf_stage_permissions")
@@ -278,6 +301,29 @@ class WrfRunTests(unittest.TestCase):
         failed_state = json.loads(project_json.read_text(encoding="utf-8"))
         self.assertEqual(failed_state["status"], "failed")
         self.assertEqual(failed_state["last_error"]["code"], "MET_EM_MISSING")
+
+    def test_run_project_syncs_namelist_levels_from_met_em(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_run_sync_levels")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        fake_wps_root = runs_dir / "_fake_wps"
+        fake_wrf_root = runs_dir / "_fake_wrf"
+        build_fake_wps_root(fake_wps_root)
+        build_fake_wrf_root(fake_wrf_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.json", wps_dir=fake_wps_root, wrf_dir=fake_wrf_root)
+        self.init_wps_ready_project(runs_dir, config_copy)
+
+        project_root = runs_dir / "demo"
+        met_em_path = project_root / "wps" / "met_em.d01.2024-07-20_00:00:00.nc"
+        write_met_em_netcdf(met_em_path, bottom_top=38, soil_levels=0)
+
+        payload = run_project("demo", runs_dir=runs_dir, config_path=config_copy, dry_run=False)
+
+        self.assertEqual(payload["project"]["status"], "completed")
+        namelist = read_namelist(project_root / "wrf" / "namelist.input")
+        self.assertEqual(namelist["domains"]["num_metgrid_levels"], 38)
+        self.assertEqual(namelist["domains"]["num_metgrid_soil_levels"], 0)
+
 
 
 if __name__ == "__main__":

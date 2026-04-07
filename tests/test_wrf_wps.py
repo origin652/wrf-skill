@@ -4,7 +4,8 @@ import stat
 import unittest
 from pathlib import Path
 
-from scripts.download_gfs import build_manifest
+from scripts.download_era5 import build_manifest as build_era5_manifest
+from scripts.download_gfs import build_manifest as build_gfs_manifest
 from scripts.wrf_config import configure_project
 from scripts.wrf_data import prepare_data
 from scripts.wrf_init import initialize_project
@@ -24,11 +25,18 @@ def make_test_dir(name: str) -> Path:
     return target
 
 
-def create_source_tree(source_root: Path, manifest: dict) -> None:
+def create_gfs_source_tree(source_root: Path, manifest: dict) -> None:
     for request in manifest["requests"]:
         target = source_root / request["remote_path"]
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(f"{request['file_name']}\n", encoding="utf-8")
+
+
+def create_era5_source_tree(source_root: Path, manifest: dict) -> None:
+    for request in manifest["requests"]:
+        target = source_root / request["remote_path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"{request['file_name']} {request['kind']}\n", encoding="utf-8")
 
 
 def write_executable(path: Path, content: str) -> None:
@@ -43,7 +51,9 @@ def build_fake_wps_root(root: Path) -> None:
     (root / "metgrid" / "METGRID.TBL.ARW").parent.mkdir(parents=True, exist_ok=True)
     (root / "metgrid" / "METGRID.TBL.ARW").write_text("metgrid\n", encoding="utf-8")
     (root / "ungrib" / "Variable_Tables" / "Vtable.GFS").parent.mkdir(parents=True, exist_ok=True)
-    (root / "ungrib" / "Variable_Tables" / "Vtable.GFS").write_text("vtable\n", encoding="utf-8")
+    (root / "ungrib" / "Variable_Tables" / "Vtable.GFS").write_text("gfs\n", encoding="utf-8")
+    (root / "ungrib" / "Variable_Tables" / "Vtable.ECMWF").parent.mkdir(parents=True, exist_ok=True)
+    (root / "ungrib" / "Variable_Tables" / "Vtable.ECMWF").write_text("ecmwf\n", encoding="utf-8")
 
     write_executable(
         root / "geogrid.exe",
@@ -55,7 +65,7 @@ def build_fake_wps_root(root: Path) -> None:
     )
     write_executable(
         root / "ungrib.exe",
-        "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'ungrib\\n' > GFS:2024-07-20_00\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'ungrib\\n' > FILE:2024-07-20_00\n",
     )
     write_executable(
         root / "metgrid.exe",
@@ -66,12 +76,21 @@ def build_fake_wps_root(root: Path) -> None:
 def write_config_copy(source: Path, target: Path, *, wps_dir: Path) -> Path:
     payload = json.loads(source.read_text(encoding="utf-8"))
     payload["wps_dir"] = wps_dir.as_posix()
+    payload["wps_tables"] = {
+        "geogrid": (wps_dir / "geogrid" / "GEOGRID.TBL.ARW").as_posix(),
+        "metgrid": (wps_dir / "metgrid" / "METGRID.TBL.ARW").as_posix(),
+        "vtable_by_source": {
+            "gfs": (wps_dir / "ungrib" / "Variable_Tables" / "Vtable.GFS").as_posix(),
+            "fnl": (wps_dir / "ungrib" / "Variable_Tables" / "Vtable.GFS").as_posix(),
+            "era5": (wps_dir / "ungrib" / "Variable_Tables" / "Vtable.ECMWF").as_posix(),
+        },
+    }
     target.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return target
 
 
 class WrfWpsTests(unittest.TestCase):
-    def init_data_ready_project(self, runs_dir: Path) -> None:
+    def init_configured_project(self, runs_dir: Path, *, data_source: str = "gfs") -> None:
         initialize_project(
             "demo",
             runs_dir=runs_dir,
@@ -90,45 +109,36 @@ class WrfWpsTests(unittest.TestCase):
             physics_preset="tropical_cyclone",
             start_time="2024-07-20_00:00:00",
             end_time="2024-07-20_01:00:00",
+            data_source=data_source,
             dry_run=False,
         )
+
+    def init_data_ready_project(self, runs_dir: Path, *, data_source: str = "gfs") -> None:
+        self.init_configured_project(runs_dir, data_source=data_source)
         source_root = runs_dir / "_source"
         source_root.mkdir(parents=True, exist_ok=True)
-        manifest = build_manifest(
-            start="2024-07-20_00:00:00",
-            end="2024-07-20_01:00:00",
-            interval_hours=3,
-            resolution="0p25",
-            base_url=source_root.as_uri(),
-        )
-        create_source_tree(source_root, manifest)
+        if data_source == "era5":
+            manifest = build_era5_manifest(
+                start="2024-07-20_00:00:00",
+                end="2024-07-20_01:00:00",
+                interval_hours=3,
+                base_url=source_root.as_uri(),
+            )
+            create_era5_source_tree(source_root, manifest)
+        else:
+            manifest = build_gfs_manifest(
+                start="2024-07-20_00:00:00",
+                end="2024-07-20_01:00:00",
+                interval_hours=3,
+                resolution="0p25",
+                base_url=source_root.as_uri(),
+            )
+            create_gfs_source_tree(source_root, manifest)
         prepare_data(
             "demo",
             runs_dir=runs_dir,
             base_url=source_root.as_uri(),
             max_workers=1,
-            dry_run=False,
-        )
-
-    def init_configured_project(self, runs_dir: Path) -> None:
-        initialize_project(
-            "demo",
-            runs_dir=runs_dir,
-            config_path=CONFIG_PATH,
-            templates_dir=TEMPLATES_DIR,
-            dry_run=False,
-            skip_env_check=True,
-        )
-        configure_project(
-            "demo",
-            runs_dir=runs_dir,
-            config_path=CONFIG_PATH,
-            domains_config=DOMAINS_CONFIG,
-            physics_config=PHYSICS_CONFIG,
-            domain_presets=["east_china"],
-            physics_preset="tropical_cyclone",
-            start_time="2024-07-20_00:00:00",
-            end_time="2024-07-20_01:00:00",
             dry_run=False,
         )
 
@@ -178,6 +188,21 @@ class WrfWpsTests(unittest.TestCase):
         self.assertTrue((wps_dir / "geogrid" / "GEOGRID.TBL").exists())
         self.assertTrue((wps_dir / "metgrid" / "METGRID.TBL").exists())
         self.assertTrue((wps_dir / "Vtable").exists())
+
+    def test_prepare_wps_uses_era5_vtable_when_requested(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_wps_era5_vtable")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_data_ready_project(runs_dir, data_source="era5")
+
+        fake_wps_root = runs_dir / "_fake_wps_era5"
+        build_fake_wps_root(fake_wps_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.era5.json", wps_dir=fake_wps_root)
+
+        payload = prepare_wps("demo", runs_dir=runs_dir, config_path=config_copy, dry_run=False)
+
+        wps_dir = runs_dir / "demo" / "wps"
+        self.assertEqual(payload["project"]["status"], "wps_ready")
+        self.assertEqual((wps_dir / "Vtable").read_text(encoding="utf-8"), "ecmwf\n")
 
     def test_prepare_wps_reuses_existing_met_em_outputs(self) -> None:
         runs_dir = make_test_dir("_test_wrf_wps_existing")

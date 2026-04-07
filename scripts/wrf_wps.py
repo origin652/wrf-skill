@@ -44,8 +44,9 @@ STEP_CODE_MAP = {
 VTABLE_BY_SOURCE = {
     "gfs": "Vtable.GFS",
     "fnl": "Vtable.GFS",
-    "era5": "Vtable.ERA5",
+    "era5": "Vtable.ECMWF",
 }
+REPO_SUPPORT_ROOT = Path(__file__).resolve().parents[1] / "third_party" / "wps-support"
 SUPPORT_TARGETS = {
     "GEOGRID.TBL": Path("geogrid") / "GEOGRID.TBL",
     "METGRID.TBL": Path("metgrid") / "METGRID.TBL",
@@ -154,20 +155,62 @@ def build_output_inventory(paths: list[Path]) -> dict[str, Any]:
     }
 
 
+def _first_existing_path(*candidates: Path) -> Path:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _source_vtable_override(overrides: dict[str, Any], data_source: str, expected_name: str) -> str | None:
+    by_source = overrides.get("vtable_by_source")
+    if isinstance(by_source, dict):
+        value = by_source.get(data_source)
+        if value:
+            return str(value)
+
+    value = overrides.get(f"vtable_{data_source}")
+    if value:
+        return str(value)
+
+    generic = overrides.get("vtable")
+    if generic and Path(str(generic)).name == expected_name:
+        return str(generic)
+    return None
+
+
 def resolve_support_sources(
     config: dict[str, Any],
     wps_root: Path,
     data_source: str,
 ) -> dict[str, Path]:
     overrides = config.get("wps_tables", {})
-    vtable_name = VTABLE_BY_SOURCE.get(str(data_source).lower())
+    source = str(data_source).lower()
+    vtable_name = VTABLE_BY_SOURCE.get(source)
     if vtable_name is None:
         raise NotImplementedError(f"Unsupported Vtable mapping for data source: {data_source}")
 
+    support_root = Path(config.get("wps_support_dir") or REPO_SUPPORT_ROOT)
+    geogrid_default = wps_root / "geogrid" / "GEOGRID.TBL.ARW"
+    metgrid_default = wps_root / "metgrid" / "METGRID.TBL.ARW"
+    vtable_default = wps_root / "ungrib" / "Variable_Tables" / vtable_name
+    geogrid_override = overrides.get("geogrid")
+    metgrid_override = overrides.get("metgrid")
+    vtable_override = _source_vtable_override(overrides, source, vtable_name)
+
     return {
-        "GEOGRID.TBL": Path(overrides.get("geogrid") or (wps_root / "geogrid" / "GEOGRID.TBL.ARW")),
-        "METGRID.TBL": Path(overrides.get("metgrid") or (wps_root / "metgrid" / "METGRID.TBL.ARW")),
-        "Vtable": Path(overrides.get("vtable") or (wps_root / "ungrib" / "Variable_Tables" / vtable_name)),
+        "GEOGRID.TBL": Path(geogrid_override) if geogrid_override else _first_existing_path(
+            geogrid_default,
+            support_root / "GEOGRID.TBL.ARW",
+        ),
+        "METGRID.TBL": Path(metgrid_override) if metgrid_override else _first_existing_path(
+            metgrid_default,
+            support_root / "METGRID.TBL.ARW",
+        ),
+        "Vtable": Path(vtable_override) if vtable_override else _first_existing_path(
+            vtable_default,
+            support_root / vtable_name,
+        ),
     }
 
 
