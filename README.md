@@ -1,42 +1,45 @@
-# WRF Skill Deployment Guide
+# WRF Skill for Claude Code and Codex
 
-`wrf-skill` is a deployment-friendly workflow layer for people using Claude Code or Codex with an existing WRF/WPS environment.
-It helps the agent create projects, render configs, run WPS/WRF steps, and manage optional HPC submission without turning this repository into a full WRF distribution.
+`wrf-skill` is a workflow layer for people who already have a usable WRF/WPS environment and want Claude Code or Codex to help operate it.
+It is not a WRF/WPS installer, compiler, or full distribution.
 
 [中文说明 / Simplified Chinese](README.zh-CN.md)
 
-## What "deploy" means here
+## What This Repository Does
 
-This repository is not a WRF/WPS installer.
-Deploying it means making this workflow layer visible to your agent:
+This repository gives the agent a reusable WRF workflow:
 
-- Claude Code: put this repository, or an installed bundle copy of it, inside a workspace that contains `.claude/skills/`.
-- Codex: put this repository, or an installed bundle copy of it, inside a workspace that Codex can read and execute from.
-- In both cases, you still provide your own WRF/WPS binaries, geog data, runtime tables, and cluster access.
+- initialize a project
+- render `simulation_spec.json`, `namelist.wps`, and `namelist.input`
+- run data, WPS, and WRF steps
+- inspect logs and status
+- support local and optional HPC workflows
 
-## Before you deploy
+This repository does not:
 
-Prepare these pieces first:
+- compile WRF or WPS for you
+- download arbitrary new data sources automatically
+- ship full `WPS_GEOG`
+- discover hidden HPC policy by itself
+- allow arbitrary local shell chains
 
-- Linux or WSL environment
+## What You Still Need
+
+Before using this repo, prepare these pieces yourself:
+
+- Linux or WSL
 - Python 3.10+
 - compiled WRF and WPS already available on disk
-- required `WPS_GEOG` data and runtime support files
-- forcing data access appropriate for your workflow
-- if you use HPC: scheduler access, login path, and site-specific runtime settings
+- required `WPS_GEOG` data and support files
+- your own forcing-data access path
+- if using HPC: scheduler access, login path, and site-specific runtime settings
 
-This repository does not do these jobs for you:
+## Recommended Paths
 
-- compile WRF or WPS
-- attach arbitrary new data sources automatically
-- discover hidden cluster policy or topology by itself
-- run arbitrary local shell chains
+### Claude Code
 
-## Deploy to Claude Code
-
-Claude Code is the most direct deployment target because this repository already ships Claude-style skills under `.claude/skills/`.
-
-### Option A: use the repository directly
+This repo already ships Claude-style skills under `.claude/skills/`.
+The simplest path is to open the repository directly in Claude Code.
 
 ```bash
 git clone https://github.com/origin652/wrf-skill.git
@@ -49,164 +52,110 @@ If you need HPC mode, start from the example config:
 cp config/wrf_env.hpc.example.json config/wrf_env.json
 ```
 
-Then open this workspace in Claude Code. Claude Code can discover the skills from `.claude/skills/`.
+Then open this repository in Claude Code.
 
-### Option B: deploy a clean bundle into another workspace
+### Codex
 
-Create a distributable archive:
-
-```bash
-python3 scripts/package_skill_bundle.py --output dist/wrf-skill-bundle.tar.gz
-```
-
-Extract it, then install it into the workspace you want Claude Code to use:
-
-```bash
-tar -xzf dist/wrf-skill-bundle.tar.gz
-cd wrf-skill-bundle
-python3 scripts/install_skill_bundle.py --target /path/to/claude-workspace
-```
-
-Use `--force` only if you intentionally want to overwrite bundled files already present in the target workspace.
-
-## Deploy to Codex
-
-This repository now ships a repo-local native Codex plugin under `plugins/wrf-skill/`.
-It is a thin wrapper around the repository workflow scripts, and `.agents/plugins/marketplace.json` makes it discoverable as a local plugin in this workspace.
-
-### Option A: use the repository directly
+For Codex, the recommended path is now skill-based, not plugin-first.
+Install the WRF skills into Codex, then use `wrf-workspace-init` to create a clean working workspace anywhere.
 
 ```bash
 git clone https://github.com/origin652/wrf-skill.git
 cd wrf-skill
+bash scripts/install_codex_skills.sh
 ```
 
-Open the repository in Codex. The local marketplace file points Codex at `plugins/wrf-skill/`.
+If Codex is already open, start a new window or new session after installation so it reloads the skill list.
 
-### Option B: install the bundle into a clean workspace
+Then ask Codex to create a workspace, for example:
+
+- `Use wrf-workspace-init to create a workspace at /path/to/my-wrf-workspace.`
+- `Use wrf-workspace-init to create a WRF workspace in the current directory.`
+
+If you want to run the bundled workspace-init script directly:
 
 ```bash
-python3 scripts/package_skill_bundle.py --output dist/wrf-skill-bundle.tar.gz
-tar -xzf dist/wrf-skill-bundle.tar.gz
-cd wrf-skill-bundle
-python3 scripts/install_skill_bundle.py --target /path/to/codex-workspace
+bash ~/.codex/skills/wrf-workspace-init/scripts/init_workspace.sh \
+  --target-root /path/to/my-wrf-workspace
 ```
 
-After that, open the target workspace in Codex. The bundle includes the native plugin files as well as the workflow scripts, so Codex can use the plugin and still operate directly on workspace state.
+After that, open the generated workspace path in Codex and continue the actual WRF work there.
 
-The plugin is intentionally thin. It expects the same workspace to still contain:
+## What `wrf-workspace-init` Creates
 
-- `scripts/`
-- `config/`
-- `templates/`
-- `runs/`
+The generated workspace is a portable minimal working tree for this repository's workflow layer.
+It includes:
 
-### Option C: register the plugin globally for Codex and deploy a workspace
-
-```bash
-bash scripts/install_codex_plugin.sh
-```
-
-By default this does all of the following:
-
-- installs the plugin to `~/plugins/wrf-skill`
-- updates `~/.agents/plugins/marketplace.json`
-- deploys a compatible workspace to `~/codex-workspaces/wrf-skill-workspace`
-- prints an `AI handoff` block telling you the workspace is ready and where it lives
-
-If you need non-default locations, use:
-
-```bash
-bash scripts/install_codex_plugin.sh \
-  --plugins-dir /path/to/plugins \
-  --marketplace-path /path/to/marketplace.json \
-  --workspace-root /path/to/wrf-skill-workspace
-```
-
-If you only want the global plugin registration and do not want a workspace copy, use:
-
-```bash
-bash scripts/install_codex_plugin.sh --no-workspace
-```
-
-When you do deploy a workspace, open that deployed path in Codex for actual WRF work.
-
-After that, tell Codex which WRF step you want it to operate.
-Practical examples:
-
-- `Use scripts/wrf_init.py to create a project called demo.`
-- `Use scripts/wrf_config.py to render a local WPS case from this request.`
-- `Run only the WPS flow for runs/<project>.`
-
-## What the bundle contains
-
-The bundle is meant for redistribution. It includes the workflow layer only:
-
-- `.agents/plugins/marketplace.json`
 - `.claude/skills/`
-- `plugins/wrf-skill/`
+- `config/`
 - `scripts/`
 - `templates/`
-- selected config presets and schema files
-- lightweight WPS support files under `third_party/wps-support/`
+- `third_party/wps-support/`
+- `runs/.gitkeep`
 
-The bundle intentionally excludes environment-specific or heavy assets:
+It intentionally excludes:
 
-- `config/wrf_env.json`
-- `runs/` outputs
+- private `config/wrf_env.json`
 - compiled WRF/WPS trees
 - full `WPS_GEOG`
+- existing run outputs
 - private SSH or scheduler credentials
 
-## Minimum configuration after deployment
-
-### Local runs
-
-Use your existing local WRF/WPS installation.
-The runtime configuration can point at project-local executables or a safe custom local runtime.
-
-Important boundary:
-
-- local customization is limited to `custom_safe`
-- `custom_safe` accepts structured argv templates only
-- raw shell strings, pipes, redirects, `bash -lc`, `source`, and similar shell chaining are intentionally blocked
-
-### HPC runs
-
-Start from the example file and make your site-specific copy:
+If you need HPC mode inside the generated workspace:
 
 ```bash
 cp config/wrf_env.hpc.example.json config/wrf_env.json
 ```
 
-Then fill in the details that this repository cannot guess for you, such as:
+Then fill in your site-specific values.
 
-- scheduler type
-- login node access mode
-- remote run directories
-- executable paths
-- queue or account defaults
-- any cluster-specific path conventions
+## Bundle Deployment
 
-## What the agent can actually see
+If you need to hand this workflow to someone else, you can still build a redistribution bundle:
 
-After deployment, the agent can work only with the information and commands that exist in the current workspace and runtime environment.
+```bash
+python3 scripts/package_skill_bundle.py --output dist/wrf-skill-bundle.tar.gz
+```
 
-It can usually:
+Install the extracted bundle into another workspace:
 
-- read project files such as `runs/<project>/project.json`
-- read `config/wrf_env.json` if you provide it
-- inspect logs generated by previous runs
-- call local commands or HPC access paths that are already available in the session
+```bash
+tar -xzf dist/wrf-skill-bundle.tar.gz
+cd wrf-skill-bundle
+python3 scripts/install_skill_bundle.py --target /path/to/workspace
+```
+
+Use `--force` only when you intentionally want to overwrite the bundled files already present in the target workspace.
+
+## Runtime Boundaries
+
+### Local runtime
+
+Local customization is intentionally constrained.
+Use `custom_safe` only when you explicitly need local runtime customization.
+
+Important boundaries:
+
+- only structured argv templates are allowed
+- raw shell strings are not allowed
+- `bash -lc`, `sh -c`, pipes, redirects, `&&`, `;`, `source`, `module load`, and similar shell chaining are intentionally blocked
+
+### HPC runtime
+
+The agent can work with HPC settings only if you expose them through files and commands that already exist in the environment.
+That means it can usually:
+
+- read `config/wrf_env.json`
+- inspect project state and logs
+- use scheduler access that is already available in the current session
 
 It cannot automatically:
 
-- see hidden cluster configuration that is not exposed through files or commands
-- know real-time scheduler capacity unless the environment exposes that information
-- install missing WRF/WPS dependencies for you
-- turn arbitrary shell snippets into trusted runtime config
+- infer hidden cluster policy
+- see real-time capacity unless the environment exposes it
+- install missing dependencies for you
 
-## First useful flow after deployment
+## First Useful Flow
 
 A minimal local workflow looks like this:
 
@@ -223,17 +172,27 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 
 If you only want preprocessing first, stop after `wrf-wps`.
 
-## Repository scope
+## Legacy Plugin Path
 
-This repository is best treated as:
+This repository still contains Codex plugin-related files and compatibility scripts.
+They are no longer the recommended deployment path.
+If you are starting fresh, use:
 
-- a skill and workflow layer for Claude Code
-- a native Codex plugin plus WRF workflow workspace
-- a redistribution-friendly bundle for users who need the same orchestration logic without your private environment
+- `bash scripts/install_codex_skills.sh`
+- `wrf-workspace-init`
+- a generated workspace opened directly in Codex
+
+## Scope
+
+This repository is best understood as:
+
+- a Claude Code skill workspace
+- a Codex skill bundle plus workspace bootstrapper
+- a redistribution-friendly WRF workflow layer
 
 It is not a replacement for a real WRF/WPS installation.
 
-## Third-party files and license
+## Third-Party Files and License
 
-Lightweight WPS support tables are documented in [THIRD_PARTY.md](THIRD_PARTY.md).
+Lightweight WPS support files are documented in [THIRD_PARTY.md](THIRD_PARTY.md).
 Project-authored files are released under [Apache-2.0](LICENSE).

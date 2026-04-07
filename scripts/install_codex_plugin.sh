@@ -30,13 +30,13 @@ usage() {
 Usage: bash scripts/install_codex_plugin.sh [options]
 
 Register the native Codex WRF plugin in a home-level plugin directory and marketplace.
-By default this script also deploys a compatible Codex workspace and prints an AI handoff block.
+By default this script also deploys a compatible Codex workspace and prints an AI handoff block. Under WSL, <codex-home> resolves to the Windows user home.
 
 Options:
   --source-root PATH        Source repository root or extracted bundle root.
-  --plugins-dir PATH        Plugin installation directory. Default: ~/plugins
-  --marketplace-path PATH   Marketplace file path. Default: ~/.agents/plugins/marketplace.json
-  --workspace-root PATH     Workspace deployment directory. Default: ~/codex-workspaces/wrf-skill-workspace
+  --plugins-dir PATH        Plugin installation directory. Default: <codex-home>/plugins
+  --marketplace-path PATH   Marketplace file path. Default: <codex-home>/.agents/plugins/marketplace.json
+  --workspace-root PATH     Workspace deployment directory. Default: <codex-home>/codex-workspaces/wrf-skill-workspace
   --plugin-name NAME        Plugin name. Default: wrf-skill
   --no-workspace            Skip workspace deployment and only register the global plugin.
   --force                   Replace an existing plugin directory, marketplace entry, or workspace.
