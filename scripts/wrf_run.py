@@ -15,6 +15,16 @@ except ImportError:  # pragma: no cover
     Dataset = None
 
 try:
+    from local_runtime import (
+        LocalRuntimeConfigError,
+        SAFE_LOCAL_MODE,
+        build_process_env,
+        local_runtime_config,
+        render_command_template,
+        trusted_exec_roots,
+        validate_local_runtime_sections,
+        validate_rendered_command,
+    )
     from namelist_parser import read_namelist, write_namelist
     from project_state import (
         clear_error,
@@ -26,6 +36,16 @@ try:
         transition,
     )
 except ImportError:  # pragma: no cover
+    from .local_runtime import (
+        LocalRuntimeConfigError,
+        SAFE_LOCAL_MODE,
+        build_process_env,
+        local_runtime_config,
+        render_command_template,
+        trusted_exec_roots,
+        validate_local_runtime_sections,
+        validate_rendered_command,
+    )
     from .namelist_parser import read_namelist, write_namelist
     from .project_state import (
         clear_error,
@@ -216,21 +236,18 @@ def stage_files(files: list[Path], target_dir: Path) -> list[str]:
 
 
 
-def build_runtime_env(command: list[str]) -> dict[str, str] | None:
-    if not command:
-        return None
-    try:
-        is_root = os.geteuid() == 0
-    except AttributeError:  # pragma: no cover
-        is_root = False
-    launcher = Path(command[0]).name
-    if not is_root or launcher not in {"mpirun", "mpiexec"}:
-        return None
-
-    env = os.environ.copy()
-    env.setdefault("OMPI_ALLOW_RUN_AS_ROOT", "1")
-    env.setdefault("OMPI_ALLOW_RUN_AS_ROOT_CONFIRM", "1")
-    return env
+def build_runtime_env(
+    command: list[str],
+    *,
+    env_overrides: dict[str, str] | None = None,
+    prepend_path: list[str] | None = None,
+) -> dict[str, str] | None:
+    env = build_process_env(
+        command,
+        env_overrides=env_overrides,
+        prepend_path=prepend_path,
+    )
+    return env if env != os.environ.copy() else None
 
 
 def build_commands(work_dir: Path, config: dict[str, Any]) -> tuple[dict[str, list[str]], int]:
@@ -359,6 +376,7 @@ def build_plan(
     support_files: list[Path],
     commands: dict[str, list[str]],
     *,
+    runtime_mode: str,
     np: int,
     boundary_path: Path,
 ) -> dict[str, Any]:
@@ -374,6 +392,7 @@ def build_plan(
         "existing_wrfinput_files": wrfinput_inventory["existing_files"],
         "existing_wrfout_files": [posix_path(path) for path in wrfout_files],
         "support_files": [posix_path(path) for path in support_files],
+        "runtime_mode": runtime_mode,
         "np": np,
         "commands": commands,
     }
@@ -398,6 +417,73 @@ def _failure(
 
 
 
+def resolve_runtime_commands(
+    config: dict[str, Any],
+    *,
+    project_root: Path,
+    work_dir: Path,
+    output_dir: Path,
+    source_run_dir: Path,
+    need_real: bool,
+    require_internal_execs: bool,
+) -> tuple[str, dict[str, list[str]], int, dict[str, str], list[str]]:
+    validate_local_runtime_sections(config)
+    runtime = local_runtime_config(config)
+    if runtime["mode"] != SAFE_LOCAL_MODE:
+        commands, np = build_commands(work_dir, config)
+        return runtime["mode"], commands, np, {}, []
+
+    if need_real and runtime.get("real_cmd") is None:
+        raise LocalRuntimeConfigError("local.runtime.real_cmd is required when real.exe must run")
+
+    np = max(1, int(config.get("local", {}).get("default_np") or 1))
+    real_exe = work_dir.resolve() / "real.exe"
+    wrf_exe = work_dir.resolve() / "wrf.exe"
+    runtime_roots = trusted_exec_roots(config, runtime, project_root=project_root)
+    context = {
+        "project_name": project_root.name,
+        "work_dir": posix_path(work_dir),
+        "output_dir": posix_path(output_dir),
+        "source_run_dir": posix_path(source_run_dir),
+        "real_exe": posix_path(real_exe),
+        "wrf_exe": posix_path(wrf_exe),
+        "np": np,
+    }
+    allowed_placeholders = {
+        "project_name",
+        "work_dir",
+        "output_dir",
+        "source_run_dir",
+        "real_exe",
+        "wrf_exe",
+        "np",
+    }
+    command_templates: dict[str, list[str]] = {"wrf": runtime["wrf_cmd"]}
+    if need_real:
+        command_templates = {"real": runtime["real_cmd"], "wrf": runtime["wrf_cmd"]}
+
+    internal_execs = [real_exe, wrf_exe]
+    commands: dict[str, list[str]] = {}
+    for step_name, template in command_templates.items():
+        command = render_command_template(
+            template,
+            context=context,
+            allowed_placeholders=allowed_placeholders,
+        )
+        validate_rendered_command(
+            command,
+            cwd=work_dir,
+            trusted_roots=runtime_roots,
+            internal_execs=internal_execs,
+            require_internal_execs=require_internal_execs,
+            prepend_path=runtime.get("prepend_path") or [],
+        )
+        commands[step_name] = command
+
+    return runtime["mode"], commands, np, runtime.get("env") or {}, runtime.get("prepend_path") or []
+
+
+
 def run_project(
     project_name: str,
     *,
@@ -417,6 +503,7 @@ def run_project(
         raise NotImplementedError("wrf-run currently supports local mode only")
 
     config = load_json(config_path)
+    runtime_mode_hint = local_runtime_config(config)["mode"]
     work_dir = Path(base_state["paths"]["wrf_dir"])
     output_dir = Path(base_state["paths"]["output_dir"])
     log_dir = Path(base_state["paths"]["log_dir"])
@@ -439,7 +526,52 @@ def run_project(
     wrfout_files = collect_wrfout_files(work_dir, output_dir)
     source_run_dir = discover_source_run_dir(config)
     support_files = collect_support_files(source_run_dir)
-    commands, np = build_commands(work_dir, config)
+    need_real = not (wrfinput_inventory["complete"] and boundary_exists)
+
+    main_log_lines = [
+        f"wrf-run project={project_name}",
+        f"work_dir={posix_path(work_dir)}",
+        f"source_run_dir={posix_path(source_run_dir)}",
+        f"namelist={posix_path(namelist_path)}",
+        f"met_em_count={met_em_inventory['existing_count']}",
+        f"existing_wrfinput_count={wrfinput_inventory['existing_count']}",
+        f"boundary_exists={boundary_exists}",
+        f"existing_wrfout_count={len(wrfout_files)}",
+        f"runtime_mode={runtime_mode_hint}",
+    ]
+    for key, payload in namelist_sync.items():
+        main_log_lines.append(f"sync_{key}={payload['old']}->{payload['new']} ({payload['source']})")
+
+    commands: dict[str, list[str]] = {}
+    np = max(1, int(config.get("local", {}).get("default_np") or 1))
+    env_overrides: dict[str, str] = {}
+    prepend_path: list[str] = []
+    should_resolve_runtime = dry_run or not wrfout_files
+    if should_resolve_runtime:
+        try:
+            runtime_mode, commands, np, env_overrides, prepend_path = resolve_runtime_commands(
+                config,
+                project_root=project_root,
+                work_dir=work_dir,
+                output_dir=output_dir,
+                source_run_dir=source_run_dir,
+                need_real=need_real,
+                require_internal_execs=False,
+            )
+        except LocalRuntimeConfigError as exc:
+            if dry_run:
+                raise
+            _failure(
+                base_state,
+                project_json_path,
+                main_log_path,
+                code="LOCAL_RUNTIME_INVALID",
+                message=str(exc),
+                log_path=main_log_path,
+                main_log_lines=main_log_lines,
+            )
+    else:
+        runtime_mode = runtime_mode_hint
 
     plan = build_plan(
         project_root,
@@ -451,6 +583,7 @@ def run_project(
         wrfout_files,
         support_files,
         commands,
+        runtime_mode=runtime_mode,
         np=np,
         boundary_path=boundary_path,
     )
@@ -479,19 +612,7 @@ def run_project(
             "plan": plan,
         }
 
-    main_log_lines = [
-        f"wrf-run project={project_name}",
-        f"work_dir={posix_path(work_dir)}",
-        f"source_run_dir={posix_path(source_run_dir)}",
-        f"namelist={posix_path(namelist_path)}",
-        f"met_em_count={met_em_inventory['existing_count']}",
-        f"existing_wrfinput_count={wrfinput_inventory['existing_count']}",
-        f"boundary_exists={boundary_exists}",
-        f"existing_wrfout_count={len(wrfout_files)}",
-        f"np={np}",
-    ]
-    for key, payload in namelist_sync.items():
-        main_log_lines.append(f"sync_{key}={payload['old']}->{payload['new']} ({payload['source']})")
+    main_log_lines.append(f"np={np}")
 
     if wrfout_files:
         state = deepcopy(base_state)
@@ -538,22 +659,43 @@ def run_project(
     stage_files(met_em_files, work_dir)
     stage_files(support_files, work_dir)
 
-    missing_binaries = []
-    need_real = not (wrfinput_inventory["complete"] and boundary_exists)
-    if need_real and not (work_dir / "real.exe").exists():
-        missing_binaries.append(posix_path(work_dir / "real.exe"))
-    if not (work_dir / "wrf.exe").exists():
-        missing_binaries.append(posix_path(work_dir / "wrf.exe"))
-    if missing_binaries:
-        _failure(
-            base_state,
-            project_json_path,
-            main_log_path,
-            code="WRF_BINARY_MISSING",
-            message=f"Missing WRF executables: {', '.join(missing_binaries)}",
-            log_path=main_log_path,
-            main_log_lines=main_log_lines,
-        )
+    if runtime_mode == SAFE_LOCAL_MODE:
+        try:
+            _, commands, np, env_overrides, prepend_path = resolve_runtime_commands(
+                config,
+                project_root=project_root,
+                work_dir=work_dir,
+                output_dir=output_dir,
+                source_run_dir=source_run_dir,
+                need_real=need_real,
+                require_internal_execs=True,
+            )
+        except LocalRuntimeConfigError as exc:
+            _failure(
+                base_state,
+                project_json_path,
+                main_log_path,
+                code="LOCAL_RUNTIME_INVALID",
+                message=str(exc),
+                log_path=main_log_path,
+                main_log_lines=main_log_lines,
+            )
+    else:
+        missing_binaries = []
+        if need_real and not (work_dir / "real.exe").exists():
+            missing_binaries.append(posix_path(work_dir / "real.exe"))
+        if not (work_dir / "wrf.exe").exists():
+            missing_binaries.append(posix_path(work_dir / "wrf.exe"))
+        if missing_binaries:
+            _failure(
+                base_state,
+                project_json_path,
+                main_log_path,
+                code="WRF_BINARY_MISSING",
+                message=f"Missing WRF executables: {', '.join(missing_binaries)}",
+                log_path=main_log_path,
+                main_log_lines=main_log_lines,
+            )
 
     state = deepcopy(base_state)
     if need_real:
@@ -563,7 +705,11 @@ def run_project(
             capture_output=True,
             text=True,
             check=False,
-            env=build_runtime_env(commands["real"]),
+            env=build_runtime_env(
+                commands["real"],
+                env_overrides=env_overrides,
+                prepend_path=prepend_path,
+            ),
         )
         output = combine_output(completed)
         write_step_log(real_log_path, commands["real"], work_dir, completed.returncode, output)
@@ -603,7 +749,11 @@ def run_project(
         capture_output=True,
         text=True,
         check=False,
-        env=build_runtime_env(commands["wrf"]),
+        env=build_runtime_env(
+            commands["wrf"],
+            env_overrides=env_overrides,
+            prepend_path=prepend_path,
+        ),
     )
     output = combine_output(completed)
     write_step_log(wrf_log_path, commands["wrf"], work_dir, completed.returncode, output)
@@ -657,8 +807,6 @@ def run_project(
         },
         "plan": plan,
     }
-
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run local WRF execution for a prepared project")

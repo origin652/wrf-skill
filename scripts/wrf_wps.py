@@ -10,6 +10,16 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from local_runtime import (
+        LocalRuntimeConfigError,
+        SAFE_LOCAL_MODE,
+        build_process_env,
+        local_wps_runtime_config,
+        render_command_template,
+        trusted_exec_roots,
+        validate_local_runtime_sections,
+        validate_rendered_command,
+    )
     from namelist_parser import read_namelist
     from project_state import (
         clear_error,
@@ -22,6 +32,16 @@ try:
     )
     from spec_utils import normalize_spec
 except ImportError:  # pragma: no cover
+    from .local_runtime import (
+        LocalRuntimeConfigError,
+        SAFE_LOCAL_MODE,
+        build_process_env,
+        local_wps_runtime_config,
+        render_command_template,
+        trusted_exec_roots,
+        validate_local_runtime_sections,
+        validate_rendered_command,
+    )
     from .namelist_parser import read_namelist
     from .project_state import (
         clear_error,
@@ -269,6 +289,8 @@ def build_plan(
     expected_outputs: list[Path],
     output_inventory: dict[str, Any],
     commands: dict[str, list[str]],
+    *,
+    runtime_mode: str,
 ) -> dict[str, Any]:
     return {
         "project_root": posix_path(project_root),
@@ -284,13 +306,16 @@ def build_plan(
         "expected_met_em_files": [posix_path(path) for path in expected_outputs],
         "existing_met_em_files": output_inventory["existing_files"],
         "missing_met_em_files": output_inventory["missing_files"],
+        "runtime_mode": runtime_mode,
         "commands": commands,
     }
+
 
 
 def write_log(log_path: Path, lines: list[str]) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8", newline="\n")
+
 
 
 def write_step_log(
@@ -310,9 +335,11 @@ def write_step_log(
     write_log(log_path, lines)
 
 
+
 def combine_output(completed: subprocess.CompletedProcess[str]) -> str:
     parts = [part for part in (completed.stdout.strip(), completed.stderr.strip()) if part]
     return "\n".join(parts)
+
 
 
 def support_target_path(work_dir: Path, name: str) -> Path:
@@ -320,9 +347,11 @@ def support_target_path(work_dir: Path, name: str) -> Path:
     return work_dir / relative
 
 
+
 def wps_output_has_error(output: str) -> bool:
     normalized = output.lower()
     return "error:" in normalized or "fatal" in normalized
+
 
 
 def stage_support_files(
@@ -338,6 +367,7 @@ def stage_support_files(
     return staged
 
 
+
 def build_support_inventory(support_sources: dict[str, Path]) -> dict[str, Any]:
     existing_files: list[str] = []
     missing_files: list[str] = []
@@ -351,6 +381,7 @@ def build_support_inventory(support_sources: dict[str, Path]) -> dict[str, Any]:
         "missing_files": missing_files,
         "complete": len(missing_files) == 0,
     }
+
 
 
 def update_project_for_wps(
@@ -371,6 +402,7 @@ def update_project_for_wps(
         state["status"] = "data_ready"
         state["current_step"] = "wrf-wps"
     return state
+
 
 
 def _failure(
@@ -396,6 +428,73 @@ def _failure(
     raise RuntimeError(message)
 
 
+
+def resolve_wps_commands(
+    config: dict[str, Any],
+    *,
+    project_root: Path,
+    work_dir: Path,
+    wps_root: Path,
+    forcing_files: list[Path],
+) -> tuple[str, dict[str, list[str]], dict[str, str], list[str]]:
+    validate_local_runtime_sections(config)
+    runtime = local_wps_runtime_config(config)
+    if runtime["mode"] != SAFE_LOCAL_MODE:
+        return runtime["mode"], build_commands(config, wps_root, forcing_files), {}, []
+
+    runtime_roots = trusted_exec_roots(config, runtime, project_root=project_root)
+    geogrid_exe = resolve_wps_executable(config, wps_root, "geogrid").resolve()
+    link_grib_exe = resolve_wps_executable(config, wps_root, "link_grib.csh").resolve()
+    ungrib_exe = resolve_wps_executable(config, wps_root, "ungrib").resolve()
+    metgrid_exe = resolve_wps_executable(config, wps_root, "metgrid").resolve()
+    context = {
+        "project_name": project_root.name,
+        "work_dir": posix_path(work_dir),
+        "wps_root": posix_path(wps_root),
+        "geogrid_exe": posix_path(geogrid_exe),
+        "link_grib_exe": posix_path(link_grib_exe),
+        "ungrib_exe": posix_path(ungrib_exe),
+        "metgrid_exe": posix_path(metgrid_exe),
+        "forcing_args": [str(path.resolve()) for path in forcing_files],
+    }
+    allowed_placeholders = {
+        "project_name",
+        "work_dir",
+        "wps_root",
+        "geogrid_exe",
+        "link_grib_exe",
+        "ungrib_exe",
+        "metgrid_exe",
+        "forcing_args",
+    }
+    templates = {
+        "geogrid": runtime["geogrid_cmd"],
+        "link_grib": runtime["link_grib_cmd"],
+        "ungrib": runtime["ungrib_cmd"],
+        "metgrid": runtime["metgrid_cmd"],
+    }
+    internal_execs = [geogrid_exe, link_grib_exe, ungrib_exe, metgrid_exe]
+    commands: dict[str, list[str]] = {}
+    for step_name, template in templates.items():
+        command = render_command_template(
+            template,
+            context=context,
+            allowed_placeholders=allowed_placeholders,
+        )
+        validate_rendered_command(
+            command,
+            cwd=work_dir,
+            trusted_roots=runtime_roots,
+            internal_execs=internal_execs,
+            require_internal_execs=True,
+            prepend_path=runtime.get("prepend_path") or [],
+        )
+        commands[step_name] = command
+
+    return runtime["mode"], commands, runtime.get("env") or {}, runtime.get("prepend_path") or []
+
+
+
 def prepare_wps(
     project_name: str,
     *,
@@ -416,6 +515,7 @@ def prepare_wps(
     base_state = load_project(project_json_path)
     spec = load_json(spec_path)
     config = load_json(config_path)
+    runtime_mode_hint = local_wps_runtime_config(config)["mode"]
 
     work_dir = Path(base_state["paths"]["wps_dir"])
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -439,7 +539,47 @@ def prepare_wps(
         interval_hours=interval_hours,
     )
     output_inventory = build_output_inventory(expected_outputs)
-    commands = build_commands(config, wps_root, forcing_files)
+
+    main_log_lines = [
+        f"wrf-wps project={project_name}",
+        f"work_dir={posix_path(work_dir)}",
+        f"wps_root={posix_path(wps_root)}",
+        f"namelist={posix_path(namelist_path)}",
+        f"forcing_count={len(forcing_files)}",
+        f"expected_met_em_count={len(expected_outputs)}",
+        f"existing_met_em_count={output_inventory['existing_count']}",
+        f"missing_met_em_count={output_inventory['missing_count']}",
+        f"runtime_mode={runtime_mode_hint}",
+    ]
+
+    commands: dict[str, list[str]] = {}
+    env_overrides: dict[str, str] = {}
+    prepend_path: list[str] = []
+    should_resolve_runtime = dry_run or not output_inventory["complete"]
+    if should_resolve_runtime:
+        try:
+            runtime_mode, commands, env_overrides, prepend_path = resolve_wps_commands(
+                config,
+                project_root=project_root,
+                work_dir=work_dir,
+                wps_root=wps_root,
+                forcing_files=forcing_files,
+            )
+        except LocalRuntimeConfigError as exc:
+            if dry_run:
+                raise
+            _failure(
+                base_state,
+                project_json_path,
+                main_log_path,
+                code="LOCAL_RUNTIME_INVALID",
+                message=str(exc),
+                log_path=main_log_path,
+                main_log_lines=main_log_lines,
+            )
+    else:
+        runtime_mode = runtime_mode_hint
+
     plan = build_plan(
         project_root,
         wps_root,
@@ -450,6 +590,7 @@ def prepare_wps(
         expected_outputs,
         output_inventory,
         commands,
+        runtime_mode=runtime_mode,
     )
 
     preview_state = deepcopy(base_state)
@@ -461,17 +602,6 @@ def prepare_wps(
             "project": preview_state,
             "plan": plan,
         }
-
-    main_log_lines = [
-        f"wrf-wps project={project_name}",
-        f"work_dir={posix_path(work_dir)}",
-        f"wps_root={posix_path(wps_root)}",
-        f"namelist={posix_path(namelist_path)}",
-        f"forcing_count={len(forcing_files)}",
-        f"expected_met_em_count={len(expected_outputs)}",
-        f"existing_met_em_count={output_inventory['existing_count']}",
-        f"missing_met_em_count={output_inventory['missing_count']}",
-    ]
 
     if output_inventory["complete"]:
         state = deepcopy(base_state)
@@ -499,21 +629,22 @@ def prepare_wps(
             main_log_lines=main_log_lines,
         )
 
-    missing_commands = [
-        command[0]
-        for command in commands.values()
-        if not Path(command[0]).exists()
-    ]
-    if missing_commands:
-        _failure(
-            base_state,
-            project_json_path,
-            main_log_path,
-            code="WPS_BINARY_MISSING",
-            message=f"Missing WPS executables: {', '.join(missing_commands)}",
-            log_path=main_log_path,
-            main_log_lines=main_log_lines,
-        )
+    if runtime_mode != SAFE_LOCAL_MODE:
+        missing_commands = [
+            command[0]
+            for command in commands.values()
+            if not Path(command[0]).exists()
+        ]
+        if missing_commands:
+            _failure(
+                base_state,
+                project_json_path,
+                main_log_path,
+                code="WPS_BINARY_MISSING",
+                message=f"Missing WPS executables: {', '.join(missing_commands)}",
+                log_path=main_log_path,
+                main_log_lines=main_log_lines,
+            )
 
     if not support_inventory["complete"]:
         _failure(
@@ -541,6 +672,11 @@ def prepare_wps(
             capture_output=True,
             text=True,
             check=False,
+            env=build_process_env(
+                command,
+                env_overrides=env_overrides,
+                prepend_path=prepend_path,
+            ),
         )
         output = combine_output(completed)
         write_step_log(step_logs[step_name], command, work_dir, completed.returncode, output)
@@ -591,7 +727,6 @@ def prepare_wps(
         "step_logs": {name: posix_path(path) for name, path in step_logs.items()},
         "plan": plan,
     }
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run WPS preprocessing for a WRF project")

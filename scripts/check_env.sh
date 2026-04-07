@@ -2,6 +2,7 @@
 set -euo pipefail
 
 CONFIG_PATH="${1:-config/wrf_env.json}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ ! -f "$CONFIG_PATH" ]]; then
   echo "Missing config file: $CONFIG_PATH" >&2
@@ -18,13 +19,31 @@ else
   exit 1
 fi
 
-readarray -t CONFIG_VALUES < <(
-"$PYTHON_CMD" - "$CONFIG_PATH" <<'PY'
+CONFIG_PAYLOAD="$($PYTHON_CMD - "$CONFIG_PATH" "$SCRIPT_DIR" <<'PY'
 import json
 import sys
+from pathlib import Path
 
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
+config_path = Path(sys.argv[1])
+script_dir = Path(sys.argv[2]).resolve()
+sys.path.insert(0, str(script_dir))
+
+from local_runtime import (  # pylint: disable=import-error
+    LocalRuntimeConfigError,
+    local_runtime_config,
+    local_wps_runtime_config,
+    required_local_external_commands,
+    validate_local_runtime_sections,
+)
+
+with config_path.open("r", encoding="utf-8") as handle:
     config = json.load(handle)
+
+try:
+    validate_local_runtime_sections(config)
+except LocalRuntimeConfigError as exc:
+    print(f"Invalid local runtime configuration: {exc}", file=sys.stderr)
+    raise SystemExit(2)
 
 fields = [
     config.get("platform", ""),
@@ -37,22 +56,34 @@ fields = [
     config.get("wps_tables", {}).get("geogrid", ""),
     config.get("wps_tables", {}).get("metgrid", ""),
     config.get("wps_tables", {}).get("vtable", ""),
+    local_runtime_config(config)["mode"],
+    local_wps_runtime_config(config)["mode"],
 ]
+
 for field in fields:
     print(field)
+for command in required_local_external_commands(config):
+    print(command)
 PY
-)
+)"
+readarray -t CONFIG_VALUES <<<"$CONFIG_PAYLOAD"
 
-PLATFORM="${CONFIG_VALUES[0]}"
-WRF_DIR="${CONFIG_VALUES[1]}"
-WPS_DIR="${CONFIG_VALUES[2]}"
-GEOG_DATA_PATH="${CONFIG_VALUES[3]}"
-PYTHON_ENV_NAME="${CONFIG_VALUES[4]}"
-WPS_BIN_DIR="${CONFIG_VALUES[5]}"
-WRF_RUN_DIR="${CONFIG_VALUES[6]}"
-GEOGRID_TBL="${CONFIG_VALUES[7]}"
-METGRID_TBL="${CONFIG_VALUES[8]}"
-VTABLE_FILE="${CONFIG_VALUES[9]}"
+PLATFORM="${CONFIG_VALUES[0]:-}"
+WRF_DIR="${CONFIG_VALUES[1]:-}"
+WPS_DIR="${CONFIG_VALUES[2]:-}"
+GEOG_DATA_PATH="${CONFIG_VALUES[3]:-}"
+PYTHON_ENV_NAME="${CONFIG_VALUES[4]:-}"
+WPS_BIN_DIR="${CONFIG_VALUES[5]:-}"
+WRF_RUN_DIR="${CONFIG_VALUES[6]:-}"
+GEOGRID_TBL="${CONFIG_VALUES[7]:-}"
+METGRID_TBL="${CONFIG_VALUES[8]:-}"
+VTABLE_FILE="${CONFIG_VALUES[9]:-}"
+LOCAL_RUNTIME_MODE="${CONFIG_VALUES[10]:-project}"
+LOCAL_WPS_RUNTIME_MODE="${CONFIG_VALUES[11]:-project}"
+REQUIRED_EXTERNAL_COMMANDS=()
+if [[ "${#CONFIG_VALUES[@]}" -gt 12 ]]; then
+  REQUIRED_EXTERNAL_COMMANDS=("${CONFIG_VALUES[@]:12}")
+fi
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "This scaffold only supports Linux/WSL execution." >&2
@@ -67,6 +98,8 @@ fi
 
 echo "Detected host: $HOST_KIND"
 echo "Configured platform: $PLATFORM"
+echo "Local WRF runtime mode: $LOCAL_RUNTIME_MODE"
+echo "Local WPS runtime mode: $LOCAL_WPS_RUNTIME_MODE"
 
 resolve_wps_exec() {
   local name="$1"
@@ -117,12 +150,16 @@ resolve_wrf_exec() {
 }
 
 MISSING=0
-for command_name in "$PYTHON_CMD" mpirun; do
+for command_name in "$PYTHON_CMD" "${REQUIRED_EXTERNAL_COMMANDS[@]}"; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "Missing command: $command_name" >&2
     MISSING=1
   fi
 done
+
+if [[ "${#REQUIRED_EXTERNAL_COMMANDS[@]}" -eq 0 ]]; then
+  echo "No extra external launcher commands are required by the current local runtime config."
+fi
 
 for path_name in "$WRF_DIR" "$WPS_DIR" "$GEOG_DATA_PATH"; do
   if [[ ! -e "$path_name" ]]; then

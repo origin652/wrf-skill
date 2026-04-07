@@ -7,6 +7,7 @@ from pathlib import Path
 
 from netCDF4 import Dataset
 
+from scripts.local_runtime import LocalRuntimeConfigError
 from scripts.namelist_parser import read_namelist
 from scripts.download_gfs import build_manifest
 from scripts.wrf_config import configure_project
@@ -52,6 +53,12 @@ def write_executable(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8", newline="\n")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
+
+def write_passthrough_runner(path: Path) -> None:
+    write_executable(
+        path,
+        "#!/usr/bin/env bash\nset -euo pipefail\ntarget=\"$1\"\nshift\nexec \"$target\" \"$@\"\n",
+    )
 
 
 def build_fake_wps_root(root: Path) -> None:
@@ -233,6 +240,60 @@ class WrfRunTests(unittest.TestCase):
         self.assertTrue((project_root / "logs" / "wrf-run-wrf.log").exists())
         self.assertTrue((wrf_dir / "LANDUSE.TBL").exists())
         self.assertTrue((wrf_dir / "met_em.d01.2024-07-20_00:00:00.nc").exists())
+
+    def test_run_project_supports_custom_safe_runtime(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_run_custom_safe")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        fake_wps_root = runs_dir / "_fake_wps"
+        fake_wrf_root = runs_dir / "_fake_wrf"
+        build_fake_wps_root(fake_wps_root)
+        build_fake_wrf_root(fake_wrf_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.json", wps_dir=fake_wps_root, wrf_dir=fake_wrf_root)
+        self.init_wps_ready_project(runs_dir, config_copy)
+
+        project_root = runs_dir / "demo"
+        runner = project_root / "tools" / "safe-runner"
+        write_passthrough_runner(runner)
+
+        payload = json.loads(config_copy.read_text(encoding="utf-8"))
+        payload["local"]["runtime"] = {
+            "mode": "custom_safe",
+            "real_cmd": [runner.as_posix(), "{real_exe}"],
+            "wrf_cmd": [runner.as_posix(), "{wrf_exe}"],
+        }
+        config_copy.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+        result = run_project("demo", runs_dir=runs_dir, config_path=config_copy, dry_run=False)
+
+        self.assertEqual(result["project"]["status"], "completed")
+        self.assertEqual(result["plan"]["runtime_mode"], "custom_safe")
+        self.assertIn(
+            runner.as_posix(),
+            (project_root / "logs" / "wrf-run-wrf.log").read_text(encoding="utf-8"),
+        )
+
+    def test_run_project_rejects_invalid_custom_safe_runtime(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_run_invalid_custom_safe")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        fake_wps_root = runs_dir / "_fake_wps"
+        fake_wrf_root = runs_dir / "_fake_wrf"
+        build_fake_wps_root(fake_wps_root)
+        build_fake_wrf_root(fake_wrf_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.json", wps_dir=fake_wps_root, wrf_dir=fake_wrf_root)
+        self.init_wps_ready_project(runs_dir, config_copy)
+
+        payload = json.loads(config_copy.read_text(encoding="utf-8"))
+        payload["local"]["runtime"] = {
+            "mode": "custom_safe",
+            "real_cmd": ["{real_exe}"],
+            "wrf_cmd": "wrf.exe",
+        }
+        config_copy.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+        with self.assertRaises(LocalRuntimeConfigError):
+            run_project("demo", runs_dir=runs_dir, config_path=config_copy, dry_run=True)
 
     def test_run_project_reuses_existing_wrfout(self) -> None:
         runs_dir = make_test_dir("_test_wrf_run_existing")

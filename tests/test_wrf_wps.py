@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from scripts.download_era5 import build_manifest as build_era5_manifest
+from scripts.local_runtime import LocalRuntimeConfigError
 from scripts.download_gfs import build_manifest as build_gfs_manifest
 from scripts.wrf_config import configure_project
 from scripts.wrf_data import prepare_data
@@ -43,6 +44,13 @@ def write_executable(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8", newline="\n")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def write_passthrough_runner(path: Path) -> None:
+    write_executable(
+        path,
+        "#!/usr/bin/env bash\nset -euo pipefail\ntarget=\"$1\"\nshift\nexec \"$target\" \"$@\"\n",
+    )
 
 
 def build_fake_wps_root(root: Path) -> None:
@@ -203,6 +211,60 @@ class WrfWpsTests(unittest.TestCase):
         wps_dir = runs_dir / "demo" / "wps"
         self.assertEqual(payload["project"]["status"], "wps_ready")
         self.assertEqual((wps_dir / "Vtable").read_text(encoding="utf-8"), "ecmwf\n")
+
+    def test_prepare_wps_supports_custom_safe_runtime(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_wps_custom_safe")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_data_ready_project(runs_dir)
+
+        fake_wps_root = runs_dir / "_fake_wps"
+        build_fake_wps_root(fake_wps_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.json", wps_dir=fake_wps_root)
+
+        project_root = runs_dir / "demo"
+        runner = project_root / "tools" / "safe-runner"
+        write_passthrough_runner(runner)
+
+        payload = json.loads(config_copy.read_text(encoding="utf-8"))
+        payload.setdefault("local", {})["wps_runtime"] = {
+            "mode": "custom_safe",
+            "geogrid_cmd": [runner.as_posix(), "{geogrid_exe}"],
+            "link_grib_cmd": [runner.as_posix(), "{link_grib_exe}", "{forcing_args}"],
+            "ungrib_cmd": [runner.as_posix(), "{ungrib_exe}"],
+            "metgrid_cmd": [runner.as_posix(), "{metgrid_exe}"],
+        }
+        config_copy.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+        result = prepare_wps("demo", runs_dir=runs_dir, config_path=config_copy, dry_run=False)
+
+        self.assertEqual(result["project"]["status"], "wps_ready")
+        self.assertEqual(result["plan"]["runtime_mode"], "custom_safe")
+        self.assertIn(
+            runner.as_posix(),
+            (project_root / "logs" / "wrf-wps-link-grib.log").read_text(encoding="utf-8"),
+        )
+
+    def test_prepare_wps_rejects_invalid_custom_safe_runtime(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_wps_invalid_custom_safe")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_data_ready_project(runs_dir)
+
+        fake_wps_root = runs_dir / "_fake_wps"
+        build_fake_wps_root(fake_wps_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.json", wps_dir=fake_wps_root)
+
+        payload = json.loads(config_copy.read_text(encoding="utf-8"))
+        payload.setdefault("local", {})["wps_runtime"] = {
+            "mode": "custom_safe",
+            "geogrid_cmd": ["{geogrid_exe}"],
+            "link_grib_cmd": "link_grib.csh",
+            "ungrib_cmd": ["{ungrib_exe}"],
+            "metgrid_cmd": ["{metgrid_exe}"],
+        }
+        config_copy.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+        with self.assertRaises(LocalRuntimeConfigError):
+            prepare_wps("demo", runs_dir=runs_dir, config_path=config_copy, dry_run=True)
 
     def test_prepare_wps_reuses_existing_met_em_outputs(self) -> None:
         runs_dir = make_test_dir("_test_wrf_wps_existing")
