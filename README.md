@@ -198,6 +198,16 @@ Normalize and validate an existing spec:
 python3 scripts/post_spec.py --input post_spec.json --output post_spec.json
 ```
 
+Render a single named figure definition directly from one or more `wrfout` files:
+
+```bash
+python3 scripts/plot_wrfout.py \
+  --wrfout runs/demo/wrf/wrfout_d01_2024-07-20_00:00:00 \
+  --figure-id surface_temperature \
+  --post-spec post_spec.json \
+  --out surface-temperature.png
+```
+
 The machine-readable contract lives in `config/post_schema.json`.
 
 ## Scope

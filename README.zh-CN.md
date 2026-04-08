@@ -199,6 +199,16 @@ python3 scripts/post_spec.py --project-name demo --output post_spec.json
 python3 scripts/post_spec.py --input post_spec.json --output post_spec.json
 ```
 
+如果你想直接从一个或多个 `wrfout` 文件渲染某个已定义的 figure，也可以：
+
+```bash
+python3 scripts/plot_wrfout.py \
+  --wrfout runs/demo/wrf/wrfout_d01_2024-07-20_00:00:00 \
+  --figure-id surface_temperature \
+  --post-spec post_spec.json \
+  --out surface-temperature.png
+```
+
 可机读的协议文件在 `config/post_schema.json`。
 
 ## 怎么理解这个仓库
