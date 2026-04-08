@@ -56,7 +56,7 @@ cp config/wrf_env.hpc.example.json config/wrf_env.json
 
 ### Codex
 
-现在对 Codex 的推荐路径已经改成了 skill-first，不再是 plugin-first。
+现在对 Codex 的推荐路径已经是 skill-first。
 先把 WRF skills 安装到 Codex，再用 `wrf-workspace-init` 在任意地方生成一个干净工作区。
 
 ```bash
@@ -173,14 +173,32 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 
 如果你这次只想先验证预处理链路，跑到 `wrf-wps` 就可以停。
 
-## 兼容性的旧 plugin 路径
+## 后处理协议
 
-仓库里目前还保留了 Codex plugin 相关文件和兼容脚本，但它已经不是推荐主路径了。
-如果你是从头开始部署，优先用：
+`post_spec.json` 是后处理和诊断请求的建议格式。
+规范形态是 `schema_version=1`，顶层包含 `defaults` 和 `products`。
 
-- `bash scripts/install_codex_skills.sh`
-- `wrf-workspace-init`
-- 直接在 Codex 里打开生成出来的工作区
+稳定部分：
+
+- `products[*].inputs`：输入文件解析方式
+- `products[*].selectors`：时间和 domain 选择
+- `products[*].render`：渲染参数
+- `products[*].output`：输出位置和 sidecar 行为
+- `products[*].options`：保留给具体产品的灵活参数
+
+生成一个起始 spec：
+
+```bash
+python3 scripts/post_spec.py --project-name demo --output post_spec.json
+```
+
+规范化并校验已有 spec：
+
+```bash
+python3 scripts/post_spec.py --input post_spec.json --output post_spec.json
+```
+
+可机读的协议文件在 `config/post_schema.json`。
 
 ## 怎么理解这个仓库
 

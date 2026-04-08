@@ -56,7 +56,7 @@ Then open this repository in Claude Code.
 
 ### Codex
 
-For Codex, the recommended path is now skill-based, not plugin-first.
+For Codex, the recommended path is skill-based.
 Install the WRF skills into Codex, then use `wrf-workspace-init` to create a clean working workspace anywhere.
 
 ```bash
@@ -172,15 +172,32 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 
 If you only want preprocessing first, stop after `wrf-wps`.
 
-## Legacy Plugin Path
+## Post-processing Protocol
 
-This repository still contains Codex plugin-related files and compatibility scripts.
-They are no longer the recommended deployment path.
-If you are starting fresh, use:
+`post_spec.json` is the intended request format for post-processing and diagnostics.
+The canonical shape is `schema_version=1` with top-level `defaults` and `products`.
 
-- `bash scripts/install_codex_skills.sh`
-- `wrf-workspace-init`
-- a generated workspace opened directly in Codex
+Stable sections:
+
+- `products[*].inputs` for file resolution
+- `products[*].selectors` for domain and time selection
+- `products[*].render` for rendering parameters
+- `products[*].output` for output location and sidecar behavior
+- `products[*].options` for product-specific parameters that should remain flexible
+
+Generate a starter spec:
+
+```bash
+python3 scripts/post_spec.py --project-name demo --output post_spec.json
+```
+
+Normalize and validate an existing spec:
+
+```bash
+python3 scripts/post_spec.py --input post_spec.json --output post_spec.json
+```
+
+The machine-readable contract lives in `config/post_schema.json`.
 
 ## Scope
 

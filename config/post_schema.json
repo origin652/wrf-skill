@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WRF post-processing specification",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "products"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "project_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "defaults": {
+      "$ref": "#/$defs/defaults"
+    },
+    "products": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/product"
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "time_token": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+    },
+    "partial_inputs": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "project_artifacts",
+            "explicit_paths",
+            "glob"
+          ]
+        },
+        "artifact": {
+          "type": "string",
+          "minLength": 1
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "pattern": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "inputs": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/partial_inputs"
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "project_artifacts"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "artifact"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "explicit_paths"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "paths"
+            ],
+            "properties": {
+              "paths": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "glob"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "pattern"
+            ]
+          }
+        }
+      ]
+    },
+    "partial_selectors": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "time_indices": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "time_range": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "start": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/time_token"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "end": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/time_token"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "max_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "partial_render": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "colormap": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dpi": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "partial_output": {
+      "type": "object",
+      "properties": {
+        "subdir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "file_stem": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sidecar_json": {
+          "type": "boolean"
+        },
+        "overwrite": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "product": {
+      "type": "object",
+      "required": [
+        "product"
+      ],
+      "properties": {
+        "product": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputs": {
+          "$ref": "#/$defs/inputs"
+        },
+        "selectors": {
+          "$ref": "#/$defs/partial_selectors"
+        },
+        "render": {
+          "$ref": "#/$defs/partial_render"
+        },
+        "output": {
+          "$ref": "#/$defs/partial_output"
+        },
+        "options": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "$ref": "#/$defs/partial_inputs"
+        },
+        "selectors": {
+          "$ref": "#/$defs/partial_selectors"
+        },
+        "render": {
+          "$ref": "#/$defs/partial_render"
+        },
+        "output": {
+          "$ref": "#/$defs/partial_output"
+        },
+        "options": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

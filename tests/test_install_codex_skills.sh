@@ -15,6 +15,9 @@ done
 
 [[ -f "$CODEX_HOME/skills/wrf-workspace-init/scripts/init_workspace.sh" ]]
 [[ -f "$CODEX_HOME/skills/wrf-workspace-init/assets/workspace-bundle/scripts/wrf_task.py" ]]
+[[ -f "$CODEX_HOME/skills/wrf-workspace-init/assets/workspace-bundle/scripts/post_spec.py" ]]
+[[ -f "$CODEX_HOME/skills/wrf-workspace-init/assets/workspace-bundle/scripts/wrf_post.py" ]]
+[[ -f "$CODEX_HOME/skills/wrf-workspace-init/assets/workspace-bundle/config/post_schema.json" ]]
 [[ -f "$CODEX_HOME/skills/wrf-workspace-init/assets/workspace-bundle/config/simulation_schema.json" ]]
 [[ -f "$CODEX_HOME/skills/wrf-workspace-init/assets/workspace-bundle/third_party/wps-support/Vtable.GFS" ]]
 

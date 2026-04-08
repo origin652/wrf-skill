@@ -14,6 +14,7 @@ WORKSPACE_BUNDLE_INCLUDE_PATHS=(
   ".gitignore"
   "config/domains_presets.json"
   "config/physics_schemes.json"
+  "config/post_schema.json"
   "config/simulation_schema.json"
   "config/wrf_env.hpc.example.json"
   "runs/.gitkeep"

@@ -15,6 +15,8 @@ OUTPUT="$(bash "$SKILL_SCRIPT" --target-root "$WORKSPACE_ROOT")"
 
 [[ -f "$WORKSPACE_ROOT/CODEX_WORKSPACE_READY.txt" ]]
 [[ -f "$WORKSPACE_ROOT/scripts/wrf_task.py" ]]
+[[ -f "$WORKSPACE_ROOT/scripts/post_spec.py" ]]
+[[ -f "$WORKSPACE_ROOT/config/post_schema.json" ]]
 [[ -f "$WORKSPACE_ROOT/config/simulation_schema.json" ]]
 [[ -f "$WORKSPACE_ROOT/.claude/skills/wrf/SKILL.md" ]]
 [[ -f "$WORKSPACE_ROOT/third_party/wps-support/Vtable.GFS" ]]

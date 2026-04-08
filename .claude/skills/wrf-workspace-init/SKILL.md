@@ -19,7 +19,7 @@ Use this skill when the user wants a new WRF workspace created in an arbitrary d
 
 ## Notes
 
-- This skill is intended to bootstrap a portable WRF workspace, not to register Codex plugins.
+- This skill is intended to bootstrap a portable WRF workspace and keep the working tree minimal.
 - The generated workspace is compatible with the existing WRF scripts in this repository.
 - If the workspace already exists and the user does not permit replacement, stop and report the conflict.
 
