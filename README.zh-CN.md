@@ -176,15 +176,16 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 ## 后处理协议
 
 `post_spec.json` 是后处理和诊断请求的建议格式。
-规范形态是 `schema_version=1`，顶层包含 `defaults` 和 `products`。
+规范形态是 `schema_version=2`，顶层包含 `defaults`、`layer_defs` 和 `figures`。
 
 稳定部分：
 
-- `products[*].inputs`：输入文件解析方式
-- `products[*].selectors`：时间和 domain 选择
-- `products[*].render`：渲染参数
-- `products[*].output`：输出位置和 sidecar 行为
-- `products[*].options`：保留给具体产品的灵活参数
+- `layer_defs`：可复用的数据图层定义，例如 `t2_c`、`wind10m`、`terrain`、`accum_precip`
+- `figures[*].inputs`：输入文件解析方式
+- `figures[*].selectors`：时间和 domain 选择
+- `figures[*].render`：图级渲染默认值
+- `figures[*].output`：输出位置和 sidecar 行为
+- `figures[*].layers[*].draw`：每个图层自己的渲染样式和顺序
 
 生成一个起始 spec：
 

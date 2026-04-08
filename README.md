@@ -175,15 +175,16 @@ If you only want preprocessing first, stop after `wrf-wps`.
 ## Post-processing Protocol
 
 `post_spec.json` is the intended request format for post-processing and diagnostics.
-The canonical shape is `schema_version=1` with top-level `defaults` and `products`.
+The canonical shape is `schema_version=2` with top-level `defaults`, `layer_defs`, and `figures`.
 
 Stable sections:
 
-- `products[*].inputs` for file resolution
-- `products[*].selectors` for domain and time selection
-- `products[*].render` for rendering parameters
-- `products[*].output` for output location and sidecar behavior
-- `products[*].options` for product-specific parameters that should remain flexible
+- `layer_defs` for reusable computed data layers such as `t2_c`, `wind10m`, `terrain`, and `accum_precip`
+- `figures[*].inputs` for file resolution
+- `figures[*].selectors` for domain and time selection
+- `figures[*].render` for figure-level rendering defaults
+- `figures[*].output` for output location and sidecar behavior
+- `figures[*].layers[*].draw` for per-layer rendering style and ordering
 
 Generate a starter spec:
 

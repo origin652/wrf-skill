@@ -19,57 +19,91 @@ def make_test_dir(name: str) -> Path:
 
 
 class PostSpecTests(unittest.TestCase):
-    def test_default_post_spec_uses_canonical_shape(self) -> None:
+    def test_default_post_spec_uses_v2_layers_shape(self) -> None:
         payload = default_post_spec("demo")
 
-        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["project_name"], "demo")
         self.assertEqual(payload["defaults"]["render"]["format"], "png")
-        self.assertEqual(payload["products"][0]["product"], "t2")
-        self.assertEqual(payload["products"][0]["output"]["subdir"], "plots")
+        self.assertIn("t2_c", payload["layer_defs"])
+        self.assertIn("terrain", payload["layer_defs"])
+        self.assertEqual(payload["figures"][0]["figure_id"], "surface_temperature")
+        self.assertEqual(payload["figures"][0]["layers"][0]["layer_id"], "t2_c")
 
-    def test_normalize_accepts_single_product_shorthand(self) -> None:
+    def test_normalize_merges_global_defaults_into_each_figure(self) -> None:
         payload = normalize_post_spec(
             {
                 "project_name": "case-a",
-                "product": "wind10m",
-                "render": {"dpi": 220},
-            }
-        )
-
-        self.assertEqual(payload["project_name"], "case-a")
-        self.assertEqual(len(payload["products"]), 1)
-        self.assertEqual(payload["products"][0]["product"], "wind10m")
-        self.assertEqual(payload["products"][0]["render"]["dpi"], 220)
-        self.assertEqual(payload["products"][0]["inputs"]["mode"], "project_artifacts")
-
-    def test_normalize_merges_global_defaults_into_each_product(self) -> None:
-        payload = normalize_post_spec(
-            {
-                "project_name": "case-b",
                 "defaults": {
                     "render": {"dpi": 180},
                     "output": {"subdir": "diagnostics"},
                 },
-                "products": [
-                    {"product": "t2"},
-                    {"product": "storm_track", "render": {"format": "json"}},
+                "layer_defs": {
+                    "custom_t2": {"expr": "T2 - 273.15", "units": "C"},
+                },
+                "figures": [
+                    {
+                        "figure_id": "fig-1",
+                        "layers": [
+                            {
+                                "layer_id": "custom_t2",
+                                "draw": {"kind": "raster", "style": {}},
+                            }
+                        ],
+                    }
                 ],
             }
         )
 
-        self.assertEqual(payload["products"][0]["render"]["dpi"], 180)
-        self.assertEqual(payload["products"][0]["output"]["subdir"], "diagnostics")
-        self.assertEqual(payload["products"][1]["render"]["format"], "json")
-        self.assertEqual(payload["products"][1]["render"]["dpi"], 180)
-        self.assertEqual(payload["products"][1]["output"]["subdir"], "diagnostics")
+        self.assertEqual(set(payload["layer_defs"]), {"custom_t2"})
+        self.assertEqual(payload["figures"][0]["render"]["dpi"], 180)
+        self.assertEqual(payload["figures"][0]["output"]["subdir"], "diagnostics")
+        self.assertEqual(payload["figures"][0]["inputs"]["mode"], "project_artifacts")
+
+    def test_validate_rejects_unknown_layer_reference(self) -> None:
+        payload = normalize_post_spec(
+            {
+                "project_name": "case-b",
+                "layer_defs": {
+                    "terrain": {"expr": "HGT", "units": "m"},
+                },
+                "figures": [
+                    {
+                        "figure_id": "fig-1",
+                        "layers": [
+                            {
+                                "layer_id": "missing_layer",
+                                "draw": {"kind": "raster", "style": {}},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        errors = validate_post_spec(payload)
+
+        self.assertTrue(any("unknown layer_defs key" in error for error in errors))
 
     def test_validate_rejects_invalid_explicit_paths_configuration(self) -> None:
         payload = normalize_post_spec(
             {
                 "project_name": "case-c",
-                "product": "t2",
-                "inputs": {"mode": "explicit_paths", "paths": []},
+                "layer_defs": {
+                    "t2_c": {"expr": "T2 - 273.15", "units": "C"},
+                },
+                "figures": [
+                    {
+                        "figure_id": "fig-1",
+                        "inputs": {"mode": "explicit_paths", "paths": []},
+                        "layers": [
+                            {
+                                "layer_id": "t2_c",
+                                "draw": {"kind": "raster", "style": {}},
+                            }
+                        ],
+                    }
+                ],
             }
         )
 
@@ -77,7 +111,7 @@ class PostSpecTests(unittest.TestCase):
 
         self.assertTrue(any("explicit_paths" in error for error in errors))
 
-    def test_cli_writes_normalized_spec(self) -> None:
+    def test_cli_writes_normalized_v2_spec(self) -> None:
         runs_dir = make_test_dir("_test_post_spec_cli")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
 
@@ -87,8 +121,24 @@ class PostSpecTests(unittest.TestCase):
             json.dumps(
                 {
                     "project_name": "case-d",
-                    "product": "accumulated_precipitation",
-                    "render": {"dpi": 240},
+                    "defaults": {"render": {"dpi": 240}},
+                    "layer_defs": {
+                        "wind10m": {"expr": "sqrt(U10**2 + V10**2)", "units": "m s-1"},
+                    },
+                    "figures": [
+                        {
+                            "figure_id": "surface-wind",
+                            "layers": [
+                                {
+                                    "layer_id": "wind10m",
+                                    "draw": {
+                                        "kind": "raster",
+                                        "style": {"colormap": "viridis"},
+                                    },
+                                }
+                            ],
+                        }
+                    ],
                 },
                 indent=2,
             )
@@ -112,8 +162,9 @@ class PostSpecTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(output_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["products"][0]["product"], "accumulated_precipitation")
-        self.assertEqual(payload["products"][0]["render"]["dpi"], 240)
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["figures"][0]["render"]["dpi"], 240)
+        self.assertEqual(payload["figures"][0]["layers"][0]["layer_id"], "wind10m")
 
 
 if __name__ == "__main__":

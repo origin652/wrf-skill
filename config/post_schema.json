@@ -4,11 +4,12 @@
   "type": "object",
   "required": [
     "schema_version",
-    "products"
+    "layer_defs",
+    "figures"
   ],
   "properties": {
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "project_name": {
       "type": "string",
@@ -17,11 +18,18 @@
     "defaults": {
       "$ref": "#/$defs/defaults"
     },
-    "products": {
+    "layer_defs": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/layer_def"
+      }
+    },
+    "figures": {
       "type": "array",
       "minItems": 1,
       "items": {
-        "$ref": "#/$defs/product"
+        "$ref": "#/$defs/figure"
       }
     }
   },
@@ -30,6 +38,22 @@
     "time_token": {
       "type": "string",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+    },
+    "category_value": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "partial_inputs": {
       "type": "object",
@@ -195,12 +219,6 @@
             "null"
           ]
         },
-        "colormap": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "dpi": {
           "type": "integer",
           "minimum": 1
@@ -230,40 +248,6 @@
       },
       "additionalProperties": true
     },
-    "product": {
-      "type": "object",
-      "required": [
-        "product"
-      ],
-      "properties": {
-        "product": {
-          "type": "string",
-          "minLength": 1
-        },
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "inputs": {
-          "$ref": "#/$defs/inputs"
-        },
-        "selectors": {
-          "$ref": "#/$defs/partial_selectors"
-        },
-        "render": {
-          "$ref": "#/$defs/partial_render"
-        },
-        "output": {
-          "$ref": "#/$defs/partial_output"
-        },
-        "options": {
-          "type": "object"
-        }
-      },
-      "additionalProperties": true
-    },
     "defaults": {
       "type": "object",
       "properties": {
@@ -278,9 +262,260 @@
         },
         "output": {
           "$ref": "#/$defs/partial_output"
+        }
+      },
+      "additionalProperties": true
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "layer_def": {
+      "type": "object",
+      "required": [
+        "expr"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
         },
-        "options": {
+        "expr": {
+          "type": "string",
+          "minLength": 1
+        },
+        "units": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
           "type": "object"
+        }
+      },
+      "additionalProperties": true
+    },
+    "category": {
+      "type": "object",
+      "required": [
+        "value",
+        "color"
+      ],
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/category_value"
+        },
+        "color": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "draw": {
+      "type": "object",
+      "required": [
+        "kind",
+        "style"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "raster",
+            "contour",
+            "categorical_fill"
+          ]
+        },
+        "alpha": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "zorder": {
+          "type": "number"
+        },
+        "style": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "contour"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "style": {
+                "type": "object",
+                "properties": {
+                  "levels": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "number"
+                    }
+                  },
+                  "colors": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    ]
+                  },
+                  "linewidths": {
+                    "oneOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      }
+                    ]
+                  },
+                  "linestyles": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    ]
+                  },
+                  "label_contours": {
+                    "type": "boolean"
+                  },
+                  "label_format": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "levels"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "categorical_fill"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "style": {
+                "type": "object",
+                "properties": {
+                  "categories": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "$ref": "#/$defs/category"
+                    }
+                  }
+                },
+                "required": [
+                  "categories"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "render_layer": {
+      "type": "object",
+      "required": [
+        "layer_id",
+        "draw"
+      ],
+      "properties": {
+        "layer_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "draw": {
+          "$ref": "#/$defs/draw"
+        }
+      },
+      "additionalProperties": true
+    },
+    "figure": {
+      "type": "object",
+      "required": [
+        "figure_id",
+        "layers"
+      ],
+      "properties": {
+        "figure_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inputs": {
+          "$ref": "#/$defs/inputs"
+        },
+        "selectors": {
+          "$ref": "#/$defs/partial_selectors"
+        },
+        "render": {
+          "$ref": "#/$defs/partial_render"
+        },
+        "output": {
+          "$ref": "#/$defs/partial_output"
+        },
+        "layers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/render_layer"
+          }
         }
       },
       "additionalProperties": true

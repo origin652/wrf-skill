@@ -13,11 +13,16 @@ try:
 except ImportError:  # pragma: no cover
     from .spec_utils import TIME_FORMAT, deep_merge
 
-DEFAULT_POST_SPEC_VERSION = 1
+DEFAULT_POST_SPEC_VERSION = 2
 ALLOWED_INPUT_MODES = {"project_artifacts", "explicit_paths", "glob"}
-PRODUCT_SECTION_KEYS = ("inputs", "selectors", "render", "output", "options")
-ROOT_RESERVED_KEYS = {"schema_version", "project_name", "defaults", "products"}
-PRODUCT_RESERVED_KEYS = {"product", "label", *PRODUCT_SECTION_KEYS}
+DEFAULT_SECTION_KEYS = ("inputs", "selectors", "render", "output")
+ROOT_RESERVED_KEYS = {
+    "schema_version",
+    "project_name",
+    "defaults",
+    "layer_defs",
+    "figures",
+}
 
 
 def load_json(path: Path | str) -> dict[str, Any]:
@@ -51,7 +56,6 @@ def default_post_defaults() -> dict[str, Any]:
         "render": {
             "format": "png",
             "title": None,
-            "colormap": None,
             "dpi": 150,
         },
         "output": {
@@ -60,41 +64,121 @@ def default_post_defaults() -> dict[str, Any]:
             "sidecar_json": True,
             "overwrite": False,
         },
-        "options": {},
     }
 
 
-def default_product_spec(product_name: str = "t2") -> dict[str, Any]:
+def default_layer_defs() -> dict[str, dict[str, Any]]:
+    return {
+        "terrain": {
+            "source": {"kind": "wrf_native"},
+            "expr": "HGT",
+            "units": "m",
+            "metadata": {
+                "description": "Terrain height from WRF output",
+            },
+        },
+        "landmask": {
+            "source": {"kind": "wrf_native"},
+            "expr": "LANDMASK",
+            "units": None,
+            "metadata": {
+                "description": "Land-sea mask from WRF output",
+            },
+        },
+        "t2_c": {
+            "source": {"kind": "wrf_native"},
+            "expr": "T2 - 273.15",
+            "units": "C",
+            "metadata": {
+                "description": "2m temperature in Celsius",
+            },
+        },
+        "wind10m": {
+            "source": {"kind": "wrf_native"},
+            "expr": "sqrt(U10**2 + V10**2)",
+            "units": "m s-1",
+            "metadata": {
+                "description": "10m wind speed magnitude",
+            },
+        },
+        "accum_precip": {
+            "source": {"kind": "wrf_native"},
+            "expr": "last(RAINC + RAINNC) - first(RAINC + RAINNC)",
+            "units": "mm",
+            "metadata": {
+                "description": "Accumulated precipitation over the selected frame range",
+            },
+        },
+    }
+
+
+def default_figure_spec() -> dict[str, Any]:
     defaults = default_post_defaults()
     return {
-        "product": product_name,
-        "label": None,
-        "inputs": deep_merge(defaults["inputs"], {"paths": [], "pattern": None}),
+        "figure_id": "surface_temperature",
+        "inputs": deepcopy(defaults["inputs"]),
         "selectors": deepcopy(defaults["selectors"]),
-        "render": deepcopy(defaults["render"]),
-        "output": deepcopy(defaults["output"]),
-        "options": deepcopy(defaults["options"]),
+        "render": deep_merge(
+            defaults["render"],
+            {
+                "title": "2m Temperature with Terrain",
+            },
+        ),
+        "output": deep_merge(
+            defaults["output"],
+            {
+                "file_stem": "surface-temperature",
+            },
+        ),
+        "layers": [
+            {
+                "layer_id": "t2_c",
+                "draw": {
+                    "kind": "raster",
+                    "alpha": 1.0,
+                    "zorder": 10,
+                    "style": {
+                        "colormap": "coolwarm",
+                        "show_colorbar": True,
+                    },
+                },
+            },
+            {
+                "layer_id": "terrain",
+                "draw": {
+                    "kind": "contour",
+                    "alpha": 0.9,
+                    "zorder": 20,
+                    "style": {
+                        "levels": [0, 500, 1000, 1500, 2000],
+                        "colors": "black",
+                        "linewidths": 0.5,
+                    },
+                },
+            },
+        ],
     }
 
 
-def default_post_spec(project_name: str = "demo", *, product_name: str = "t2") -> dict[str, Any]:
+def _empty_post_spec(project_name: str = "demo") -> dict[str, Any]:
     return {
         "schema_version": DEFAULT_POST_SPEC_VERSION,
         "project_name": project_name,
         "defaults": default_post_defaults(),
-        "products": [default_product_spec(product_name)],
+        "layer_defs": {},
+        "figures": [],
     }
 
 
-def _coerce_root_shorthand(spec: dict[str, Any]) -> dict[str, Any]:
-    payload = deepcopy(spec)
-    if "products" in payload or "product" not in payload:
-        return payload
-
-    root = {key: deepcopy(value) for key, value in payload.items() if key in ROOT_RESERVED_KEYS}
-    product = {key: deepcopy(value) for key, value in payload.items() if key not in ROOT_RESERVED_KEYS}
-    root["products"] = [product]
-    return root
+def default_post_spec(project_name: str = "demo", *, product_name: str | None = None) -> dict[str, Any]:
+    del product_name
+    return {
+        "schema_version": DEFAULT_POST_SPEC_VERSION,
+        "project_name": project_name,
+        "defaults": default_post_defaults(),
+        "layer_defs": default_layer_defs(),
+        "figures": [default_figure_spec()],
+    }
 
 
 def _seed_project_name(spec: dict[str, Any], project_name_fallback: str | None) -> str:
@@ -106,24 +190,99 @@ def _seed_project_name(spec: dict[str, Any], project_name_fallback: str | None) 
     return "demo"
 
 
-def _normalize_product_spec(raw_product: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
-    seed_product = str(raw_product.get("product") or "").strip() or "t2"
-    base_product = default_product_spec(seed_product)
+def _normalize_source(raw_source: Any) -> dict[str, Any]:
+    base = {"kind": "wrf_native"}
+    if isinstance(raw_source, dict):
+        return deep_merge(base, raw_source)
+    return base
+
+
+def _normalize_layer_def(raw_layer: Any) -> dict[str, Any]:
     normalized = {
-        key: deepcopy(value)
-        for key, value in raw_product.items()
-        if key not in PRODUCT_RESERVED_KEYS
+        "source": {"kind": "wrf_native"},
+        "expr": "",
+        "units": None,
+        "metadata": {},
     }
-    normalized["product"] = raw_product.get("product", seed_product)
-    normalized["label"] = raw_product.get("label")
+    if not isinstance(raw_layer, dict):
+        normalized["expr"] = str(raw_layer)
+        return normalized
 
-    for section in PRODUCT_SECTION_KEYS:
-        merged = deepcopy(base_product[section])
-        default_overlay = defaults.get(section)
-        if isinstance(default_overlay, dict):
-            merged = deep_merge(merged, default_overlay)
+    for key, value in raw_layer.items():
+        if key not in {"source", "expr", "units", "metadata"}:
+            normalized[key] = deepcopy(value)
+    normalized["source"] = _normalize_source(raw_layer.get("source"))
+    normalized["expr"] = raw_layer.get("expr", "")
+    normalized["units"] = raw_layer.get("units")
+    metadata = raw_layer.get("metadata")
+    normalized["metadata"] = deepcopy(metadata) if isinstance(metadata, dict) else {}
+    return normalized
 
-        raw_value = raw_product.get(section)
+
+def _normalize_draw(raw_draw: Any) -> dict[str, Any]:
+    normalized: dict[str, Any] = {
+        "kind": None,
+        "alpha": 1.0,
+        "zorder": None,
+        "style": {},
+    }
+    if not isinstance(raw_draw, dict):
+        return normalized
+
+    for key, value in raw_draw.items():
+        if key not in {"kind", "alpha", "zorder", "style"}:
+            normalized[key] = deepcopy(value)
+    normalized["kind"] = raw_draw.get("kind")
+    normalized["alpha"] = raw_draw.get("alpha", 1.0)
+    normalized["zorder"] = raw_draw.get("zorder")
+    style = raw_draw.get("style")
+    normalized["style"] = deepcopy(style) if isinstance(style, dict) else {}
+    return normalized
+
+
+def _normalize_render_layer(raw_layer: Any) -> dict[str, Any]:
+    normalized: dict[str, Any] = {
+        "layer_id": None,
+        "draw": _normalize_draw({}),
+    }
+    if not isinstance(raw_layer, dict):
+        normalized["layer_id"] = str(raw_layer)
+        return normalized
+
+    for key, value in raw_layer.items():
+        if key not in {"layer_id", "draw"}:
+            normalized[key] = deepcopy(value)
+    normalized["layer_id"] = raw_layer.get("layer_id")
+    normalized["draw"] = _normalize_draw(raw_layer.get("draw"))
+    return normalized
+
+
+def _normalize_figure(raw_figure: Any, defaults: dict[str, Any]) -> dict[str, Any]:
+    base = {
+        "figure_id": None,
+        "inputs": deep_merge(default_post_defaults()["inputs"], defaults.get("inputs", {})),
+        "selectors": deep_merge(
+            default_post_defaults()["selectors"],
+            defaults.get("selectors", {}),
+        ),
+        "render": deep_merge(default_post_defaults()["render"], defaults.get("render", {})),
+        "output": deep_merge(default_post_defaults()["output"], defaults.get("output", {})),
+        "layers": [],
+    }
+    if not isinstance(raw_figure, dict):
+        base["figure_id"] = str(raw_figure)
+        return base
+
+    normalized: dict[str, Any] = {
+        key: deepcopy(value)
+        for key, value in raw_figure.items()
+        if key not in {"figure_id", *DEFAULT_SECTION_KEYS, "layers"}
+    }
+    normalized["figure_id"] = raw_figure.get("figure_id")
+
+    for section in DEFAULT_SECTION_KEYS:
+        merged = deepcopy(base[section])
+        raw_value = raw_figure.get(section)
         if isinstance(raw_value, dict):
             normalized[section] = deep_merge(merged, raw_value)
         elif raw_value is None:
@@ -131,6 +290,11 @@ def _normalize_product_spec(raw_product: dict[str, Any], defaults: dict[str, Any
         else:
             normalized[section] = deepcopy(raw_value)
 
+    raw_layers = raw_figure.get("layers")
+    if isinstance(raw_layers, list):
+        normalized["layers"] = [_normalize_render_layer(item) for item in raw_layers]
+    else:
+        normalized["layers"] = []
     return normalized
 
 
@@ -139,9 +303,9 @@ def normalize_post_spec(
     *,
     project_name_fallback: str | None = None,
 ) -> dict[str, Any]:
-    incoming = _coerce_root_shorthand(spec)
+    incoming = deepcopy(spec)
     seed_name = _seed_project_name(incoming, project_name_fallback)
-    normalized = default_post_spec(seed_name)
+    normalized = _empty_post_spec(seed_name)
 
     for key, value in incoming.items():
         if key not in ROOT_RESERVED_KEYS:
@@ -149,7 +313,6 @@ def normalize_post_spec(
 
     if "schema_version" in incoming:
         normalized["schema_version"] = deepcopy(incoming["schema_version"])
-
     if "project_name" in incoming:
         normalized["project_name"] = deepcopy(incoming["project_name"])
 
@@ -159,17 +322,20 @@ def normalize_post_spec(
     elif raw_defaults is not None:
         normalized["defaults"] = deepcopy(raw_defaults)
 
-    raw_products = incoming.get("products")
+    raw_layer_defs = incoming.get("layer_defs")
+    if isinstance(raw_layer_defs, dict):
+        normalized["layer_defs"] = {
+            str(layer_id): _normalize_layer_def(layer_def)
+            for layer_id, layer_def in raw_layer_defs.items()
+        }
+
+    raw_figures = incoming.get("figures")
     defaults = normalized["defaults"] if isinstance(normalized["defaults"], dict) else {}
-    if isinstance(raw_products, list):
-        normalized["products"] = []
-        for item in raw_products:
-            if isinstance(item, dict):
-                normalized["products"].append(_normalize_product_spec(item, defaults))
-            else:
-                normalized["products"].append(
-                    _normalize_product_spec({"product": str(item)}, defaults)
-                )
+    if isinstance(raw_figures, list):
+        normalized["figures"] = [
+            _normalize_figure(item, defaults)
+            for item in raw_figures
+        ]
 
     if (
         "project_name" not in incoming
@@ -177,7 +343,6 @@ def normalize_post_spec(
         or not normalized["project_name"].strip()
     ):
         normalized["project_name"] = seed_name
-
     if "schema_version" not in incoming:
         normalized["schema_version"] = DEFAULT_POST_SPEC_VERSION
 
@@ -198,14 +363,13 @@ def _validate_defaults(defaults: Any, errors: list[str]) -> None:
     if not isinstance(defaults, dict):
         errors.append("defaults must be an object when provided")
         return
-    for section in PRODUCT_SECTION_KEYS:
+    for section in DEFAULT_SECTION_KEYS:
         value = defaults.get(section)
         if value is not None and not isinstance(value, dict):
             errors.append(f"defaults.{section} must be an object when provided")
 
 
-def _validate_inputs(inputs: Any, product_index: int, errors: list[str]) -> None:
-    prefix = f"products[{product_index}].inputs"
+def _validate_inputs(inputs: Any, prefix: str, errors: list[str]) -> None:
     if not isinstance(inputs, dict):
         errors.append(f"{prefix} must be an object")
         return
@@ -238,8 +402,7 @@ def _validate_inputs(inputs: Any, product_index: int, errors: list[str]) -> None
         errors.append(f"{prefix}.pattern must be a non-empty string in glob mode")
 
 
-def _validate_selectors(selectors: Any, product_index: int, errors: list[str]) -> None:
-    prefix = f"products[{product_index}].selectors"
+def _validate_selectors(selectors: Any, prefix: str, errors: list[str]) -> None:
     if not isinstance(selectors, dict):
         errors.append(f"{prefix} must be an object")
         return
@@ -278,8 +441,7 @@ def _validate_selectors(selectors: Any, product_index: int, errors: list[str]) -
         errors.append(f"{prefix}.max_files must be a positive integer or null")
 
 
-def _validate_render(render: Any, product_index: int, errors: list[str]) -> None:
-    prefix = f"products[{product_index}].render"
+def _validate_render(render: Any, prefix: str, errors: list[str]) -> None:
     if not isinstance(render, dict):
         errors.append(f"{prefix} must be an object")
         return
@@ -292,14 +454,12 @@ def _validate_render(render: Any, product_index: int, errors: list[str]) -> None
     if not isinstance(dpi, int) or dpi < 1:
         errors.append(f"{prefix}.dpi must be a positive integer")
 
-    for key in ("title", "colormap"):
-        value = render.get(key)
-        if value is not None and (not isinstance(value, str) or not value.strip()):
-            errors.append(f"{prefix}.{key} must be a non-empty string or null")
+    title = render.get("title")
+    if title is not None and (not isinstance(title, str) or not title.strip()):
+        errors.append(f"{prefix}.title must be a non-empty string or null")
 
 
-def _validate_output(output: Any, product_index: int, errors: list[str]) -> None:
-    prefix = f"products[{product_index}].output"
+def _validate_output(output: Any, prefix: str, errors: list[str]) -> None:
     if not isinstance(output, dict):
         errors.append(f"{prefix} must be an object")
         return
@@ -318,6 +478,87 @@ def _validate_output(output: Any, product_index: int, errors: list[str]) -> None
             errors.append(f"{prefix}.{key} must be a boolean")
 
 
+def _validate_layer_def(layer_id: str, layer_def: Any, errors: list[str]) -> None:
+    prefix = f"layer_defs.{layer_id}"
+    if not layer_id.strip():
+        errors.append("layer_defs keys must be non-empty strings")
+        return
+    if not isinstance(layer_def, dict):
+        errors.append(f"{prefix} must be an object")
+        return
+
+    source = layer_def.get("source")
+    if not isinstance(source, dict):
+        errors.append(f"{prefix}.source must be an object")
+    else:
+        kind = source.get("kind")
+        if not isinstance(kind, str) or not kind.strip():
+            errors.append(f"{prefix}.source.kind must be a non-empty string")
+
+    expr = layer_def.get("expr")
+    if not isinstance(expr, str) or not expr.strip():
+        errors.append(f"{prefix}.expr must be a non-empty string")
+
+    units = layer_def.get("units")
+    if units is not None and (not isinstance(units, str) or not units.strip()):
+        errors.append(f"{prefix}.units must be a non-empty string or null")
+
+    metadata = layer_def.get("metadata")
+    if not isinstance(metadata, dict):
+        errors.append(f"{prefix}.metadata must be an object")
+
+
+def _validate_draw(draw: Any, prefix: str, errors: list[str]) -> None:
+    if not isinstance(draw, dict):
+        errors.append(f"{prefix} must be an object")
+        return
+
+    kind = draw.get("kind")
+    allowed_kinds = {"raster", "contour", "categorical_fill"}
+    if not isinstance(kind, str) or kind not in allowed_kinds:
+        errors.append(f"{prefix}.kind must be one of {', '.join(sorted(allowed_kinds))}")
+
+    alpha = draw.get("alpha")
+    if not isinstance(alpha, (int, float)) or alpha < 0 or alpha > 1:
+        errors.append(f"{prefix}.alpha must be a number between 0 and 1")
+
+    zorder = draw.get("zorder")
+    if zorder is not None and not isinstance(zorder, (int, float)):
+        errors.append(f"{prefix}.zorder must be a number or null")
+
+    style = draw.get("style")
+    if not isinstance(style, dict):
+        errors.append(f"{prefix}.style must be an object")
+        return
+
+    if kind == "contour":
+        levels = style.get("levels")
+        if not isinstance(levels, list) or not levels:
+            errors.append(f"{prefix}.style.levels must be a non-empty list for contour")
+        else:
+            for index, value in enumerate(levels):
+                if not isinstance(value, (int, float)):
+                    errors.append(f"{prefix}.style.levels[{index}] must be a number")
+    elif kind == "categorical_fill":
+        categories = style.get("categories")
+        if not isinstance(categories, list) or not categories:
+            errors.append(f"{prefix}.style.categories must be a non-empty list for categorical_fill")
+        else:
+            for index, category in enumerate(categories):
+                item_prefix = f"{prefix}.style.categories[{index}]"
+                if not isinstance(category, dict):
+                    errors.append(f"{item_prefix} must be an object")
+                    continue
+                if "value" not in category:
+                    errors.append(f"{item_prefix}.value is required")
+                color = category.get("color")
+                if not isinstance(color, str) or not color.strip():
+                    errors.append(f"{item_prefix}.color must be a non-empty string")
+                label = category.get("label")
+                if label is not None and (not isinstance(label, str) or not label.strip()):
+                    errors.append(f"{item_prefix}.label must be a non-empty string or null")
+
+
 def validate_post_spec(spec: dict[str, Any]) -> list[str]:
     errors: list[str] = []
 
@@ -331,33 +572,50 @@ def validate_post_spec(spec: dict[str, Any]) -> list[str]:
 
     _validate_defaults(spec.get("defaults"), errors)
 
-    products = spec.get("products")
-    if not isinstance(products, list) or not products:
-        errors.append("products must be a non-empty list")
+    layer_defs = spec.get("layer_defs")
+    if not isinstance(layer_defs, dict) or not layer_defs:
+        errors.append("layer_defs must be a non-empty object")
+        layer_defs = {}
+    else:
+        for layer_id, layer_def in layer_defs.items():
+            _validate_layer_def(str(layer_id), layer_def, errors)
+
+    figures = spec.get("figures")
+    if not isinstance(figures, list) or not figures:
+        errors.append("figures must be a non-empty list")
         return errors
 
-    for product_index, product in enumerate(products):
-        prefix = f"products[{product_index}]"
-        if not isinstance(product, dict):
+    for figure_index, figure in enumerate(figures):
+        prefix = f"figures[{figure_index}]"
+        if not isinstance(figure, dict):
             errors.append(f"{prefix} must be an object")
             continue
 
-        product_name = product.get("product")
-        if not isinstance(product_name, str) or not product_name.strip():
-            errors.append(f"{prefix}.product must be a non-empty string")
+        figure_id = figure.get("figure_id")
+        if not isinstance(figure_id, str) or not figure_id.strip():
+            errors.append(f"{prefix}.figure_id must be a non-empty string")
 
-        label = product.get("label")
-        if label is not None and (not isinstance(label, str) or not label.strip()):
-            errors.append(f"{prefix}.label must be a non-empty string or null")
+        _validate_inputs(figure.get("inputs"), f"{prefix}.inputs", errors)
+        _validate_selectors(figure.get("selectors"), f"{prefix}.selectors", errors)
+        _validate_render(figure.get("render"), f"{prefix}.render", errors)
+        _validate_output(figure.get("output"), f"{prefix}.output", errors)
 
-        _validate_inputs(product.get("inputs"), product_index, errors)
-        _validate_selectors(product.get("selectors"), product_index, errors)
-        _validate_render(product.get("render"), product_index, errors)
-        _validate_output(product.get("output"), product_index, errors)
+        layers = figure.get("layers")
+        if not isinstance(layers, list) or not layers:
+            errors.append(f"{prefix}.layers must be a non-empty list")
+            continue
 
-        options = product.get("options")
-        if not isinstance(options, dict):
-            errors.append(f"{prefix}.options must be an object")
+        for layer_index, layer in enumerate(layers):
+            layer_prefix = f"{prefix}.layers[{layer_index}]"
+            if not isinstance(layer, dict):
+                errors.append(f"{layer_prefix} must be an object")
+                continue
+            layer_id = layer.get("layer_id")
+            if not isinstance(layer_id, str) or not layer_id.strip():
+                errors.append(f"{layer_prefix}.layer_id must be a non-empty string")
+            elif layer_id not in layer_defs:
+                errors.append(f"{layer_prefix}.layer_id references unknown layer_defs key: {layer_id}")
+            _validate_draw(layer.get("draw"), f"{layer_prefix}.draw", errors)
 
     return errors
 
@@ -380,11 +638,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Project name fallback or starter-spec value.",
     )
     parser.add_argument(
-        "--product",
-        default="t2",
-        help="Starter product name when --input is omitted.",
-    )
-    parser.add_argument(
         "--check",
         action="store_true",
         help="Validate only and do not emit normalized JSON.",
@@ -397,7 +650,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.input:
         payload = load_json(args.input)
     else:
-        payload = default_post_spec(args.project_name, product_name=args.product)
+        payload = default_post_spec(args.project_name)
 
     normalized = normalize_post_spec(payload, project_name_fallback=args.project_name)
     errors = validate_post_spec(normalized)
