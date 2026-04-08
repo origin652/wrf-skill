@@ -10,7 +10,7 @@ try:
     from plot_wrfout import (
         enumerate_wrfout_frames,
         infer_domain_from_path,
-        run_product_request,
+        run_figure_request,
         select_wrfout_frames,
     )
     from post_spec import default_post_spec, load_json, normalize_post_spec, validate_post_spec
@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover
     from .plot_wrfout import (
         enumerate_wrfout_frames,
         infer_domain_from_path,
-        run_product_request,
+        run_figure_request,
         select_wrfout_frames,
     )
     from .post_spec import (
@@ -83,13 +83,13 @@ def _resolve_paths_from_artifact(state: dict[str, Any], artifact_name: str) -> l
 
 
 def resolve_input_paths(
-    product_spec: dict[str, Any],
+    figure_spec: dict[str, Any],
     state: dict[str, Any],
     *,
     project_dir: Path,
 ) -> list[Path]:
-    inputs = product_spec.get("inputs", {})
-    selectors = product_spec.get("selectors", {})
+    inputs = figure_spec.get("inputs", {})
+    selectors = figure_spec.get("selectors", {})
     mode = str(inputs.get("mode") or "project_artifacts")
 
     if mode == "project_artifacts":
@@ -180,25 +180,26 @@ def run_postprocess(
     generated: list[dict[str, Any]] = []
 
     try:
-        for index, product_spec in enumerate(spec["products"], start=1):
-            input_paths = resolve_input_paths(product_spec, state, project_dir=project_dir)
+        for index, figure_spec in enumerate(spec["figures"], start=1):
+            input_paths = resolve_input_paths(figure_spec, state, project_dir=project_dir)
             if not input_paths:
                 raise FileNotFoundError(
-                    f"No input files resolved for product {product_spec['product']}"
+                    f"No input files resolved for figure {figure_spec['figure_id']}"
                 )
 
             frames = enumerate_wrfout_frames(input_paths)
-            selected_frames = select_wrfout_frames(frames, product_spec.get("selectors"))
+            selected_frames = select_wrfout_frames(frames, figure_spec.get("selectors"))
             if not selected_frames:
                 raise ValueError(
-                    f"No frames selected for product {product_spec['product']} after applying selectors"
+                    f"No frames selected for figure {figure_spec['figure_id']} after applying selectors"
                 )
 
             lines.append(
-                f"[product {index}] name={product_spec['product']} inputs={len(input_paths)} frames={len(selected_frames)}"
+                f"[figure {index}] id={figure_spec['figure_id']} inputs={len(input_paths)} frames={len(selected_frames)}"
             )
-            artifacts = run_product_request(
-                product_spec,
+            artifacts = run_figure_request(
+                figure_spec,
+                spec["layer_defs"],
                 selected_frames,
                 output_dir,
                 dry_run=dry_run,

@@ -4,19 +4,24 @@ import argparse
 import json
 import re
 from collections import defaultdict
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pyparsing as pp
 
 try:
     import matplotlib
 
     matplotlib.use("Agg")
+    from matplotlib import colors as mcolors
     import matplotlib.pyplot as plt
 except ImportError:  # pragma: no cover
     matplotlib = None
+    mcolors = None
     plt = None
 
 try:
@@ -24,33 +29,69 @@ try:
 except ImportError:  # pragma: no cover
     Dataset = None
 
+try:
+    from post_spec import default_post_spec, load_json, normalize_post_spec, validate_post_spec
+except ImportError:  # pragma: no cover
+    from .post_spec import default_post_spec, load_json, normalize_post_spec, validate_post_spec
+
 TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
-SUPPORTED_PRODUCTS = {
-    "accumulated_precipitation",
-    "t2",
-    "wind10m",
-    "h500",
-    "storm_track",
-}
-IMPLEMENTED_PRODUCTS = {
-    "accumulated_precipitation",
-    "t2",
-    "wind10m",
-}
-DEFAULT_COLORMAPS = {
-    "accumulated_precipitation": "Blues",
-    "t2": "coolwarm",
-    "wind10m": "viridis",
-}
 DOMAIN_PATTERN = re.compile(r"(d\d{2})")
+DRAW_KINDS = {"raster", "contour", "categorical_fill"}
+FUNCTION_NAMES = {
+    "sqrt",
+    "abs",
+    "minimum",
+    "maximum",
+    "clip",
+    "where",
+    "current",
+    "first",
+    "last",
+}
 
 
 class PlottingDependencyError(RuntimeError):
     pass
 
 
-class ProductNotImplementedError(NotImplementedError):
+class FormulaParseError(ValueError):
     pass
+
+
+class LayerResolutionError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class NumberNode:
+    value: float
+
+
+@dataclass(frozen=True)
+class NameNode:
+    name: str
+
+
+@dataclass(frozen=True)
+class UnaryOpNode:
+    op: str
+    operand: Any
+
+
+@dataclass(frozen=True)
+class BinaryOpNode:
+    op: str
+    left: Any
+    right: Any
+
+
+@dataclass(frozen=True)
+class CallNode:
+    name: str
+    args: tuple[Any, ...]
+
+
+pp.ParserElement.enable_packrat()
 
 
 def posix_path(path: Path | str) -> str:
@@ -61,8 +102,10 @@ def ensure_plotting_dependencies() -> None:
     missing: list[str] = []
     if Dataset is None:
         missing.append("netCDF4")
-    if plt is None:
+    if plt is None or mcolors is None:
         missing.append("matplotlib")
+    if not hasattr(pp, "infix_notation"):
+        missing.append("pyparsing")
     if missing:
         raise PlottingDependencyError(
             f"Missing plotting dependencies: {', '.join(missing)}"
@@ -212,19 +255,19 @@ def _output_root(base_output_dir: Path, output_cfg: dict[str, Any]) -> Path:
 
 def _build_output_path(
     base_output_dir: Path,
-    product_spec: dict[str, Any],
+    figure_spec: dict[str, Any],
     suffix_tokens: list[str],
     *,
     allow_exact_path: bool = False,
 ) -> Path:
-    output_cfg = product_spec.get("output", {})
-    render_cfg = product_spec.get("render", {})
+    output_cfg = figure_spec.get("output", {})
+    render_cfg = figure_spec.get("render", {})
     exact_path = output_cfg.get("path")
     if allow_exact_path and exact_path:
         return Path(str(exact_path))
 
     output_dir = _output_root(base_output_dir, output_cfg)
-    stem = str(output_cfg.get("file_stem") or product_spec["product"])
+    stem = str(output_cfg.get("file_stem") or figure_spec["figure_id"])
     pieces = [_sanitize_token(stem)]
     pieces.extend(_sanitize_token(token) for token in suffix_tokens if token)
     suffix = str(render_cfg.get("format") or "png").lower()
@@ -250,30 +293,6 @@ def _summary(field: np.ndarray) -> dict[str, float | None]:
     }
 
 
-def _render_field_png(
-    field: np.ndarray,
-    *,
-    output_path: Path,
-    title: str,
-    colormap: str,
-    dpi: int,
-    units: str | None,
-) -> None:
-    ensure_plotting_dependencies()
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure, axis = plt.subplots(figsize=(6, 5), constrained_layout=True)
-    image = axis.imshow(field, origin="lower", cmap=colormap)
-    axis.set_title(title)
-    axis.set_xlabel("west_east")
-    axis.set_ylabel("south_north")
-    colorbar = figure.colorbar(image, ax=axis, shrink=0.9)
-    if units:
-        colorbar.set_label(units)
-    figure.savefig(output_path, dpi=dpi)
-    plt.close(figure)
-
-
 def _load_2d_var(dataset: Dataset, name: str, time_index: int) -> tuple[np.ndarray, str | None]:
     variable = dataset.variables.get(name)
     if variable is None:
@@ -289,119 +308,20 @@ def _load_2d_var(dataset: Dataset, name: str, time_index: int) -> tuple[np.ndarr
     return field, getattr(variable, "units", None)
 
 
-def _serialize_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    payload: list[dict[str, Any]] = []
-    for frame in frames:
-        payload.append(
-            {
-                "path": posix_path(frame["path"]),
-                "domain": frame.get("domain"),
-                "time_index": int(frame["time_index"]),
-                "global_index": int(frame["global_index"]),
-                "valid_time": frame.get("valid_time"),
-            }
-        )
-    return payload
-
-
-def _compose_title(product_spec: dict[str, Any], frames: list[dict[str, Any]]) -> str:
-    render_cfg = product_spec.get("render", {})
-    base = render_cfg.get("title") or product_spec.get("label") or product_spec["product"]
-    first_frame = frames[0]
-    last_frame = frames[-1]
-    details: list[str] = []
-    if last_frame.get("domain"):
-        details.append(str(last_frame["domain"]))
-
-    first_time = first_frame.get("valid_time")
-    last_time = last_frame.get("valid_time")
-    if first_time and last_time:
-        if first_time == last_time:
-            details.append(str(last_time))
-        else:
-            details.append(f"{first_time} -> {last_time}")
-    elif last_time:
-        details.append(str(last_time))
-
-    suffix = " | ".join(details)
-    return f"{base} | {suffix}" if suffix else str(base)
-
-
-def _artifact_payload(
-    product_spec: dict[str, Any],
-    *,
-    output_path: Path,
-    sidecar_path: Path | None,
-    frames: list[dict[str, Any]],
-    field: np.ndarray | None,
-    units: str | None,
-    title: str,
-) -> dict[str, Any]:
-    source_files: list[str] = []
-    for frame in frames:
-        source = posix_path(frame["path"])
-        if source not in source_files:
-            source_files.append(source)
-
+def _serialize_frame(frame: dict[str, Any] | None) -> dict[str, Any] | None:
+    if frame is None:
+        return None
     return {
-        "product": product_spec["product"],
-        "path": posix_path(output_path),
-        "sidecar_path": None if sidecar_path is None else posix_path(sidecar_path),
-        "format": str(product_spec.get("render", {}).get("format") or "png").lower(),
-        "title": title,
-        "domain": frames[-1].get("domain"),
-        "units": units,
-        "source_files": source_files,
-        "selected_frames": _serialize_frames(frames),
-        "summary": None if field is None else _summary(field),
+        "path": posix_path(frame["path"]),
+        "domain": frame.get("domain"),
+        "time_index": int(frame["time_index"]),
+        "global_index": int(frame["global_index"]),
+        "valid_time": frame.get("valid_time"),
     }
 
 
-def _write_artifact(
-    product_spec: dict[str, Any],
-    *,
-    output_path: Path,
-    frames: list[dict[str, Any]],
-    field: np.ndarray,
-    units: str | None,
-    title: str,
-    colormap: str,
-    dpi: int,
-    dry_run: bool,
-) -> dict[str, Any]:
-    output_cfg = product_spec.get("output", {})
-    overwrite = bool(output_cfg.get("overwrite", False))
-    sidecar_enabled = bool(output_cfg.get("sidecar_json", True))
-    sidecar_path = output_path.with_suffix(".json") if sidecar_enabled else None
-
-    payload = _artifact_payload(
-        product_spec,
-        output_path=output_path,
-        sidecar_path=sidecar_path,
-        frames=frames,
-        field=field,
-        units=units,
-        title=title,
-    )
-    if dry_run:
-        return payload
-
-    if output_path.exists() and not overwrite:
-        raise FileExistsError(f"Refusing to overwrite existing plot: {output_path}")
-    if sidecar_path is not None and sidecar_path.exists() and not overwrite:
-        raise FileExistsError(f"Refusing to overwrite existing sidecar: {sidecar_path}")
-
-    _render_field_png(
-        field,
-        output_path=output_path,
-        title=title,
-        colormap=colormap,
-        dpi=dpi,
-        units=units,
-    )
-    if sidecar_path is not None:
-        _write_json(sidecar_path, payload)
-    return payload
+def _serialize_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_serialize_frame(frame) for frame in frames]  # type: ignore[list-item]
 
 
 def _group_frames_by_domain(
@@ -418,282 +338,655 @@ def _group_frames_by_domain(
     return items
 
 
-def _instantaneous_requests(
-    frames: list[dict[str, Any]],
-    selectors: dict[str, Any] | None,
-) -> list[list[dict[str, Any]]]:
-    if has_explicit_time_selection(selectors):
-        return [[frame] for frame in frames]
-    return [[group[-1]] for _, group in _group_frames_by_domain(frames) if group]
+def _default_zorder(kind: str) -> int:
+    return {
+        "categorical_fill": 3,
+        "raster": 10,
+        "contour": 20,
+    }.get(kind, 10)
 
 
-def _prepare_t2(
+def _figure_suffix_tokens(
+    selected_frames: list[dict[str, Any]],
+    current_frame: dict[str, Any] | None,
+    *,
+    uses_current: bool,
+) -> list[str]:
+    domain = selected_frames[-1].get("domain") or ""
+    if uses_current and current_frame is not None:
+        return [domain, _time_token(current_frame.get("valid_time")) or ""]
+
+    first_frame = selected_frames[0]
+    last_frame = selected_frames[-1]
+    first_time = _time_token(first_frame.get("valid_time"))
+    last_time = _time_token(last_frame.get("valid_time"))
+    if first_time and last_time and first_time != last_time:
+        return [domain, _sanitize_token(f"{first_time}-to-{last_time}")]
+    return [domain, last_time or first_time or ""]
+
+
+def _compose_title(
+    figure_spec: dict[str, Any],
+    selected_frames: list[dict[str, Any]],
+    current_frame: dict[str, Any] | None,
+    *,
+    uses_current: bool,
+) -> str:
+    render_cfg = figure_spec.get("render", {})
+    base = render_cfg.get("title") or figure_spec["figure_id"]
+    details: list[str] = []
+    if selected_frames[-1].get("domain"):
+        details.append(str(selected_frames[-1]["domain"]))
+
+    if uses_current and current_frame is not None and current_frame.get("valid_time"):
+        details.append(str(current_frame["valid_time"]))
+    else:
+        first_time = selected_frames[0].get("valid_time")
+        last_time = selected_frames[-1].get("valid_time")
+        if first_time and last_time:
+            if first_time == last_time:
+                details.append(str(last_time))
+            else:
+                details.append(f"{first_time} -> {last_time}")
+
+    suffix = " | ".join(details)
+    return f"{base} | {suffix}" if suffix else str(base)
+
+
+def _artifact_payload(
+    figure_spec: dict[str, Any],
+    *,
+    output_path: Path,
+    sidecar_path: Path | None,
+    selected_frames: list[dict[str, Any]],
+    current_frame: dict[str, Any] | None,
+    title: str,
+    resolved_layers: list[dict[str, Any]],
+    layer_summaries: dict[str, dict[str, float | None]],
+) -> dict[str, Any]:
+    source_files: list[str] = []
+    for frame in selected_frames:
+        source = posix_path(frame["path"])
+        if source not in source_files:
+            source_files.append(source)
+
+    return {
+        "figure_id": figure_spec["figure_id"],
+        "path": posix_path(output_path),
+        "sidecar_path": None if sidecar_path is None else posix_path(sidecar_path),
+        "format": str(figure_spec.get("render", {}).get("format") or "png").lower(),
+        "title": title,
+        "domain": selected_frames[-1].get("domain"),
+        "current_frame": _serialize_frame(current_frame),
+        "selected_frames": _serialize_frames(selected_frames),
+        "source_files": source_files,
+        "resolved_layers": resolved_layers,
+        "layer_summaries": layer_summaries,
+    }
+
+
+def _ensure_2d_field(value: Any, *, label: str) -> np.ndarray:
+    field = np.asarray(np.ma.filled(value, np.nan), dtype=float)
+    if field.ndim != 2:
+        raise ValueError(f"{label} must resolve to a 2D field, received ndim={field.ndim}")
+    return field
+
+
+def _render_raster(
+    axis: Any,
+    figure: Any,
     field: np.ndarray,
+    *,
+    draw: dict[str, Any],
     units: str | None,
-    options: dict[str, Any],
-) -> tuple[np.ndarray, str | None]:
-    target_units = str(options.get("units") or "celsius").lower()
-    if target_units in {"k", "kelvin"}:
-        return field, "K" if units and units.lower().startswith("k") else units
-    if target_units in {"c", "celsius", "degc", "degrees_celsius"}:
-        if units and units.lower().startswith("k"):
-            return field - 273.15, "C"
-        return field, "C"
-    return field, units
+) -> None:
+    style = draw.get("style", {})
+    image = axis.imshow(
+        field,
+        origin="lower",
+        cmap=str(style.get("colormap") or "viridis"),
+        alpha=float(draw.get("alpha", 1.0)),
+        zorder=float(draw.get("zorder") or _default_zorder("raster")),
+        vmin=style.get("vmin"),
+        vmax=style.get("vmax"),
+    )
+    if bool(style.get("show_colorbar", True)):
+        colorbar = figure.colorbar(image, ax=axis, shrink=0.9)
+        if units:
+            colorbar.set_label(units)
 
 
-def _run_t2(
-    product_spec: dict[str, Any],
-    frames: list[dict[str, Any]],
+def _render_contour(axis: Any, field: np.ndarray, *, draw: dict[str, Any]) -> None:
+    style = draw.get("style", {})
+    contour = axis.contour(
+        field,
+        levels=style.get("levels"),
+        colors=style.get("colors"),
+        linewidths=style.get("linewidths"),
+        linestyles=style.get("linestyles"),
+        alpha=float(draw.get("alpha", 1.0)),
+        zorder=float(draw.get("zorder") or _default_zorder("contour")),
+    )
+    if bool(style.get("label_contours", False)):
+        axis.clabel(contour, fmt=str(style.get("label_format") or "%1.0f"))
+
+
+def _render_categorical_fill(axis: Any, field: np.ndarray, *, draw: dict[str, Any]) -> None:
+    style = draw.get("style", {})
+    rgba = np.zeros(field.shape + (4,), dtype=float)
+    draw_alpha = float(draw.get("alpha", 1.0))
+    for category in style.get("categories", []):
+        category_rgba = list(mcolors.to_rgba(category["color"]))
+        category_rgba[3] *= draw_alpha
+        rgba[np.asarray(field == category["value"])] = category_rgba
+    axis.imshow(
+        rgba,
+        origin="lower",
+        zorder=float(draw.get("zorder") or _default_zorder("categorical_fill")),
+    )
+
+
+def _render_layer(
+    axis: Any,
+    figure: Any,
+    field: np.ndarray,
     *,
-    base_output_dir: Path,
-    dry_run: bool,
-) -> list[dict[str, Any]]:
-    if not frames:
-        raise ValueError("No frames selected for t2")
+    draw: dict[str, Any],
+    units: str | None,
+) -> None:
+    kind = str(draw.get("kind") or "")
+    if kind == "raster":
+        _render_raster(axis, figure, field, draw=draw, units=units)
+        return
+    if kind == "contour":
+        _render_contour(axis, field, draw=draw)
+        return
+    if kind == "categorical_fill":
+        _render_categorical_fill(axis, field, draw=draw)
+        return
+    raise ValueError(f"Unsupported draw.kind: {kind}")
 
-    render_cfg = product_spec.get("render", {})
-    requests = _instantaneous_requests(frames, product_spec.get("selectors"))
 
-    artifacts: list[dict[str, Any]] = []
-    for request in requests:
-        frame = request[-1]
+def _make_number(tokens: pp.ParseResults) -> NumberNode:
+    return NumberNode(float(tokens[0]))
+
+
+def _make_name(tokens: pp.ParseResults) -> NameNode:
+    return NameNode(str(tokens[0]))
+
+
+def _make_call(tokens: pp.ParseResults) -> CallNode:
+    token = tokens[0]
+    args = tuple(token.get("args", []))
+    return CallNode(str(token["func"]), args)
+
+
+def _make_unary(tokens: pp.ParseResults) -> UnaryOpNode:
+    token = tokens[0]
+    return UnaryOpNode(str(token[0]), token[1])
+
+
+def _make_binary(tokens: pp.ParseResults) -> Any:
+    token = tokens[0]
+    node = token[0]
+    for index in range(1, len(token), 2):
+        node = BinaryOpNode(str(token[index]), node, token[index + 1])
+    return node
+
+
+def _expression_parser() -> pp.ParserElement:
+    expr = pp.Forward()
+    identifier = pp.Word(pp.alphas + "_", pp.alphanums + "_")
+    number = pp.pyparsing_common.fnumber().set_parse_action(_make_number)
+    name = identifier.copy().set_parse_action(_make_name)
+    function_call = (
+        pp.Group(
+            identifier("func")
+            + pp.Suppress("(")
+            + pp.Optional(pp.delimited_list(expr), default=[])("args")
+            + pp.Suppress(")")
+        )
+        .set_parse_action(_make_call)
+    )
+    atom = function_call | number | name | (pp.Suppress("(") + expr + pp.Suppress(")"))
+    expr <<= pp.infix_notation(
+        atom,
+        [
+            (pp.one_of("+ -"), 1, pp.opAssoc.RIGHT, _make_unary),
+            (pp.Literal("**"), 2, pp.opAssoc.RIGHT, _make_binary),
+            (pp.one_of("* /"), 2, pp.opAssoc.LEFT, _make_binary),
+            (pp.one_of("+ -"), 2, pp.opAssoc.LEFT, _make_binary),
+        ],
+    )
+    return expr
+
+
+FORMULA_PARSER = _expression_parser()
+
+
+def parse_formula(expr: str) -> Any:
+    try:
+        parsed = FORMULA_PARSER.parse_string(expr, parse_all=True)[0]
+    except pp.ParseBaseException as exc:
+        raise FormulaParseError(f"Invalid layer expression: {expr}") from exc
+    return parsed
+
+
+def _collect_layer_refs(node: Any, known_layers: set[str]) -> set[str]:
+    if isinstance(node, NumberNode):
+        return set()
+    if isinstance(node, NameNode):
+        return {node.name} if node.name in known_layers else set()
+    if isinstance(node, UnaryOpNode):
+        return _collect_layer_refs(node.operand, known_layers)
+    if isinstance(node, BinaryOpNode):
+        return _collect_layer_refs(node.left, known_layers) | _collect_layer_refs(node.right, known_layers)
+    if isinstance(node, CallNode):
+        refs: set[str] = set()
+        for arg in node.args:
+            refs |= _collect_layer_refs(arg, known_layers)
+        return refs
+    raise TypeError(f"Unsupported AST node: {type(node)!r}")
+
+
+def resolve_layer_dependencies(
+    layer_defs: dict[str, dict[str, Any]],
+    root_layer_ids: list[str],
+) -> tuple[dict[str, Any], list[str]]:
+    known_layers = set(layer_defs)
+    parsed_defs = {
+        layer_id: parse_formula(str(layer_def.get("expr") or ""))
+        for layer_id, layer_def in layer_defs.items()
+    }
+    order: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(layer_id: str) -> None:
+        if layer_id in visited:
+            return
+        if layer_id in visiting:
+            raise LayerResolutionError(f"Cyclic layer dependency detected at: {layer_id}")
+        if layer_id not in layer_defs:
+            raise LayerResolutionError(f"Unknown layer_id referenced by figure: {layer_id}")
+
+        visiting.add(layer_id)
+        for dependency in sorted(_collect_layer_refs(parsed_defs[layer_id], known_layers)):
+            visit(dependency)
+        visiting.remove(layer_id)
+        visited.add(layer_id)
+        order.append(layer_id)
+
+    for layer_id in root_layer_ids:
+        visit(layer_id)
+    return parsed_defs, order
+
+
+def _node_uses_current(
+    node: Any,
+    layer_uses_current: Any,
+    *,
+    fixed_scope: bool = False,
+) -> bool:
+    if isinstance(node, NumberNode):
+        return False
+    if isinstance(node, NameNode):
+        if fixed_scope:
+            return False
+        return bool(layer_uses_current(node.name))
+    if isinstance(node, UnaryOpNode):
+        return _node_uses_current(node.operand, layer_uses_current, fixed_scope=fixed_scope)
+    if isinstance(node, BinaryOpNode):
+        return _node_uses_current(node.left, layer_uses_current, fixed_scope=fixed_scope) or _node_uses_current(
+            node.right,
+            layer_uses_current,
+            fixed_scope=fixed_scope,
+        )
+    if isinstance(node, CallNode):
+        func = node.name.lower()
+        if func in {"first", "last"}:
+            return False
+        if func == "current":
+            return any(
+                _node_uses_current(arg, layer_uses_current, fixed_scope=False)
+                for arg in node.args
+            )
+        return any(
+            _node_uses_current(arg, layer_uses_current, fixed_scope=fixed_scope)
+            for arg in node.args
+        )
+    raise TypeError(f"Unsupported AST node: {type(node)!r}")
+
+
+def layer_uses_current(
+    layer_id: str,
+    parsed_defs: dict[str, Any],
+    *,
+    memo: dict[str, bool] | None = None,
+) -> bool:
+    cache = memo if memo is not None else {}
+    if layer_id in cache:
+        return cache[layer_id]
+
+    def _delegate(name: str) -> bool:
+        if name in parsed_defs:
+            return layer_uses_current(name, parsed_defs, memo=cache)
+        return True
+
+    cache[layer_id] = _node_uses_current(parsed_defs[layer_id], _delegate)
+    return cache[layer_id]
+
+
+class FigureEvaluator:
+    def __init__(
+        self,
+        layer_defs: dict[str, dict[str, Any]],
+        parsed_defs: dict[str, Any],
+        frames: list[dict[str, Any]],
+    ) -> None:
+        self.layer_defs = layer_defs
+        self.parsed_defs = parsed_defs
+        self.frames = frames
+        self.variable_cache: dict[tuple[str, int, str], tuple[np.ndarray, str | None]] = {}
+        self.layer_cache: dict[tuple[str, int | None], tuple[np.ndarray, str | None]] = {}
+
+    def _cache_key(self, layer_id: str, current_frame: dict[str, Any] | None) -> tuple[str, int | None]:
+        if current_frame is None:
+            return (layer_id, None)
+        return (layer_id, int(current_frame["global_index"]))
+
+    def load_variable(
+        self,
+        frame: dict[str, Any],
+        name: str,
+    ) -> tuple[np.ndarray, str | None]:
+        key = (posix_path(frame["path"]), int(frame["time_index"]), name)
+        cached = self.variable_cache.get(key)
+        if cached is not None:
+            return cached
+
         with Dataset(frame["path"]) as dataset:
-            field, units = _load_2d_var(dataset, "T2", int(frame["time_index"]))
-        field, units = _prepare_t2(field, units, product_spec.get("options", {}))
-        title = _compose_title(product_spec, request)
-        output_path = _build_output_path(
-            base_output_dir,
-            product_spec,
-            [frame.get("domain") or "", _time_token(frame.get("valid_time")) or ""],
-            allow_exact_path=len(requests) == 1,
-        )
-        artifacts.append(
-            _write_artifact(
-                product_spec,
-                output_path=output_path,
-                frames=request,
-                field=field,
-                units=units,
-                title=title,
-                colormap=str(render_cfg.get("colormap") or DEFAULT_COLORMAPS["t2"]),
-                dpi=int(render_cfg.get("dpi") or 150),
-                dry_run=dry_run,
+            field, units = _load_2d_var(dataset, name, int(frame["time_index"]))
+        self.variable_cache[key] = (field, units)
+        return field, units
+
+    def evaluate_layer(
+        self,
+        layer_id: str,
+        current_frame: dict[str, Any],
+    ) -> tuple[np.ndarray, str | None]:
+        cache_key = self._cache_key(layer_id, current_frame)
+        cached = self.layer_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        layer_def = self.layer_defs[layer_id]
+        source = layer_def.get("source", {})
+        source_kind = str(source.get("kind") or "wrf_native")
+        if source_kind != "wrf_native":
+            raise NotImplementedError(
+                f"source.kind is recognized but not implemented yet: {source_kind}"
             )
+
+        field = _ensure_2d_field(
+            self._evaluate_node(self.parsed_defs[layer_id], current_frame),
+            label=f"layer_defs.{layer_id}",
         )
-    return artifacts
+        units = layer_def.get("units")
+        units_value = None if units is None else str(units)
+        payload = (field, units_value)
+        self.layer_cache[cache_key] = payload
+        return payload
+
+    def _evaluate_node(self, node: Any, current_frame: dict[str, Any]) -> Any:
+        if isinstance(node, NumberNode):
+            return float(node.value)
+        if isinstance(node, NameNode):
+            if node.name in self.layer_defs:
+                return self.evaluate_layer(node.name, current_frame)[0]
+            return self.load_variable(current_frame, node.name)[0]
+        if isinstance(node, UnaryOpNode):
+            value = self._evaluate_node(node.operand, current_frame)
+            if node.op == "+":
+                return value
+            if node.op == "-":
+                return -value
+            raise ValueError(f"Unsupported unary operator: {node.op}")
+        if isinstance(node, BinaryOpNode):
+            left = self._evaluate_node(node.left, current_frame)
+            right = self._evaluate_node(node.right, current_frame)
+            if node.op == "+":
+                return left + right
+            if node.op == "-":
+                return left - right
+            if node.op == "*":
+                return left * right
+            if node.op == "/":
+                return left / right
+            if node.op == "**":
+                return left ** right
+            raise ValueError(f"Unsupported binary operator: {node.op}")
+        if isinstance(node, CallNode):
+            func = node.name.lower()
+            if func not in FUNCTION_NAMES:
+                raise ValueError(f"Unsupported expression function: {node.name}")
+            if func == "current":
+                if len(node.args) != 1:
+                    raise ValueError("current() expects exactly one argument")
+                return self._evaluate_node(node.args[0], current_frame)
+            if func == "first":
+                if len(node.args) != 1:
+                    raise ValueError("first() expects exactly one argument")
+                return self._evaluate_node(node.args[0], self.frames[0])
+            if func == "last":
+                if len(node.args) != 1:
+                    raise ValueError("last() expects exactly one argument")
+                return self._evaluate_node(node.args[0], self.frames[-1])
+
+            args = [self._evaluate_node(arg, current_frame) for arg in node.args]
+            if func == "sqrt":
+                return np.sqrt(args[0])
+            if func == "abs":
+                return np.abs(args[0])
+            if func == "minimum":
+                if len(args) < 2:
+                    raise ValueError("minimum() expects at least two arguments")
+                result = args[0]
+                for arg in args[1:]:
+                    result = np.minimum(result, arg)
+                return result
+            if func == "maximum":
+                if len(args) < 2:
+                    raise ValueError("maximum() expects at least two arguments")
+                result = args[0]
+                for arg in args[1:]:
+                    result = np.maximum(result, arg)
+                return result
+            if func == "clip":
+                if len(args) != 3:
+                    raise ValueError("clip() expects exactly three arguments")
+                return np.clip(args[0], args[1], args[2])
+            if func == "where":
+                if len(args) != 3:
+                    raise ValueError("where() expects exactly three arguments")
+                return np.where(args[0], args[1], args[2])
+        raise TypeError(f"Unsupported AST node: {type(node)!r}")
 
 
-def _run_wind10m(
-    product_spec: dict[str, Any],
-    frames: list[dict[str, Any]],
-    *,
-    base_output_dir: Path,
-    dry_run: bool,
-) -> list[dict[str, Any]]:
-    if not frames:
-        raise ValueError("No frames selected for wind10m")
-
-    render_cfg = product_spec.get("render", {})
-    requests = _instantaneous_requests(frames, product_spec.get("selectors"))
-
-    artifacts: list[dict[str, Any]] = []
-    for request in requests:
-        frame = request[-1]
-        with Dataset(frame["path"]) as dataset:
-            u10, units = _load_2d_var(dataset, "U10", int(frame["time_index"]))
-            v10, _ = _load_2d_var(dataset, "V10", int(frame["time_index"]))
-        field = np.sqrt(np.square(u10) + np.square(v10))
-        title = _compose_title(product_spec, request)
-        output_path = _build_output_path(
-            base_output_dir,
-            product_spec,
-            [frame.get("domain") or "", _time_token(frame.get("valid_time")) or ""],
-            allow_exact_path=len(requests) == 1,
-        )
-        artifacts.append(
-            _write_artifact(
-                product_spec,
-                output_path=output_path,
-                frames=request,
-                field=field,
-                units=units,
-                title=title,
-                colormap=str(
-                    render_cfg.get("colormap") or DEFAULT_COLORMAPS["wind10m"]
-                ),
-                dpi=int(render_cfg.get("dpi") or 150),
-                dry_run=dry_run,
-            )
-        )
-    return artifacts
-
-
-def _precip_total(frame: dict[str, Any]) -> np.ndarray:
-    with Dataset(frame["path"]) as dataset:
-        rainc, _ = _load_2d_var(dataset, "RAINC", int(frame["time_index"]))
-        rainnc, _ = _load_2d_var(dataset, "RAINNC", int(frame["time_index"]))
-    return rainc + rainnc
-
-
-def _run_accumulated_precipitation(
-    product_spec: dict[str, Any],
-    frames: list[dict[str, Any]],
-    *,
-    base_output_dir: Path,
-    dry_run: bool,
-) -> list[dict[str, Any]]:
-    if not frames:
-        raise ValueError("No frames selected for accumulated_precipitation")
-
-    render_cfg = product_spec.get("render", {})
-    artifacts: list[dict[str, Any]] = []
-    for _, group in _group_frames_by_domain(frames):
-        if not group:
-            continue
-        first_frame = group[0]
-        last_frame = group[-1]
-        if len(group) == 1:
-            field = _precip_total(last_frame)
-        else:
-            field = _precip_total(last_frame) - _precip_total(first_frame)
-
-        first_time = _time_token(first_frame.get("valid_time"))
-        last_time = _time_token(last_frame.get("valid_time"))
-        if first_time and last_time and first_time != last_time:
-            time_token = _sanitize_token(f"{first_time}-to-{last_time}")
-        else:
-            time_token = last_time or first_time or ""
-
-        output_path = _build_output_path(
-            base_output_dir,
-            product_spec,
-            [last_frame.get("domain") or "", time_token],
-            allow_exact_path=len(frames) == len(group) and len(group) == 1,
-        )
-        artifacts.append(
-            _write_artifact(
-                product_spec,
-                output_path=output_path,
-                frames=group,
-                field=field,
-                units="mm",
-                title=_compose_title(product_spec, group),
-                colormap=str(
-                    render_cfg.get("colormap")
-                    or DEFAULT_COLORMAPS["accumulated_precipitation"]
-                ),
-                dpi=int(render_cfg.get("dpi") or 150),
-                dry_run=dry_run,
-            )
-        )
-    return artifacts
-
-
-PRODUCT_HANDLERS = {
-    "accumulated_precipitation": _run_accumulated_precipitation,
-    "t2": _run_t2,
-    "wind10m": _run_wind10m,
-}
-
-
-def run_product_request(
-    product_spec: dict[str, Any],
+def run_figure_request(
+    figure_spec: dict[str, Any],
+    layer_defs: dict[str, dict[str, Any]],
     frames: list[dict[str, Any]],
     base_output_dir: Path | str,
     *,
     dry_run: bool = False,
 ) -> list[dict[str, Any]]:
-    product_name = str(product_spec.get("product") or "").strip()
-    if product_name not in SUPPORTED_PRODUCTS:
-        raise ValueError(f"Unsupported product: {product_name}")
+    ensure_plotting_dependencies()
+    if not frames:
+        raise ValueError("No frames selected for figure rendering")
 
-    handler = PRODUCT_HANDLERS.get(product_name)
-    if handler is None:
-        raise ProductNotImplementedError(
-            f"Product is recognized but not implemented yet: {product_name}"
-        )
+    root_layer_ids = [str(layer["layer_id"]) for layer in figure_spec.get("layers", [])]
+    parsed_defs, _ = resolve_layer_dependencies(layer_defs, root_layer_ids)
+    usage_memo: dict[str, bool] = {}
+    uses_current = any(
+        layer_uses_current(layer_id, parsed_defs, memo=usage_memo)
+        for layer_id in root_layer_ids
+    )
 
-    render_format = str(product_spec.get("render", {}).get("format") or "png").lower()
-    if render_format != "png":
-        raise ProductNotImplementedError(
-            f"Phase 1 supports only PNG rendering, received: {render_format}"
-        )
+    artifacts: list[dict[str, Any]] = []
+    for _, group in _group_frames_by_domain(frames):
+        if not group:
+            continue
 
-    return handler(product_spec, frames, base_output_dir=Path(base_output_dir), dry_run=dry_run)
+        evaluator = FigureEvaluator(layer_defs, parsed_defs, group)
+        output_targets = group if uses_current else [group[-1]]
+        allow_exact_path = len(output_targets) == 1 and len(_group_frames_by_domain(frames)) == 1
+        output_cfg = figure_spec.get("output", {})
+        overwrite = bool(output_cfg.get("overwrite", False))
+        sidecar_enabled = bool(output_cfg.get("sidecar_json", True))
+
+        for target in output_targets:
+            current_frame = target if uses_current else None
+            title = _compose_title(
+                figure_spec,
+                group,
+                current_frame,
+                uses_current=uses_current,
+            )
+            output_path = _build_output_path(
+                Path(base_output_dir),
+                figure_spec,
+                _figure_suffix_tokens(group, target, uses_current=uses_current),
+                allow_exact_path=allow_exact_path,
+            )
+            sidecar_path = output_path.with_suffix(".json") if sidecar_enabled else None
+
+            resolved_layers: list[dict[str, Any]] = []
+            layer_summaries: dict[str, dict[str, float | None]] = {}
+
+            if output_path.exists() and not overwrite:
+                raise FileExistsError(f"Refusing to overwrite existing plot: {output_path}")
+            if sidecar_path is not None and sidecar_path.exists() and not overwrite:
+                raise FileExistsError(f"Refusing to overwrite existing sidecar: {sidecar_path}")
+
+            figure = axis = None
+            if not dry_run:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                figure, axis = plt.subplots(figsize=(6, 5), constrained_layout=True)
+                axis.set_xlabel("west_east")
+                axis.set_ylabel("south_north")
+                axis.set_title(title)
+
+            for render_layer in figure_spec.get("layers", []):
+                layer_id = str(render_layer["layer_id"])
+                draw = render_layer["draw"]
+                field, units = evaluator.evaluate_layer(layer_id, target)
+                layer_summaries[layer_id] = _summary(field)
+                resolved_layers.append(
+                    {
+                        "layer_id": layer_id,
+                        "expr": str(layer_defs[layer_id].get("expr") or ""),
+                        "source": deepcopy(layer_defs[layer_id].get("source") or {}),
+                        "units": layer_defs[layer_id].get("units"),
+                        "draw": deepcopy(draw),
+                    }
+                )
+                if not dry_run and axis is not None and figure is not None:
+                    _render_layer(axis, figure, field, draw=draw, units=units)
+
+            payload = _artifact_payload(
+                figure_spec,
+                output_path=output_path,
+                sidecar_path=sidecar_path,
+                selected_frames=group,
+                current_frame=current_frame,
+                title=title,
+                resolved_layers=resolved_layers,
+                layer_summaries=layer_summaries,
+            )
+
+            if not dry_run and figure is not None:
+                figure.savefig(output_path, dpi=int(figure_spec.get("render", {}).get("dpi") or 150))
+                plt.close(figure)
+                if sidecar_path is not None:
+                    _write_json(sidecar_path, payload)
+            artifacts.append(payload)
+
+    return artifacts
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Render a single WRF post-processing product."
+        description="Render a single figure from a v2 WRF post-processing spec."
     )
-    parser.add_argument("--wrfout", required=True)
-    parser.add_argument("--product", required=True, choices=sorted(SUPPORTED_PRODUCTS))
+    parser.add_argument("--wrfout", nargs="+", required=True)
+    parser.add_argument("--figure-id", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--time-index", type=int, default=0)
-    parser.add_argument("--title")
-    parser.add_argument("--colormap")
-    parser.add_argument("--dpi", type=int, default=150)
+    parser.add_argument("--post-spec")
+    parser.add_argument("--project-name", default="demo")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    wrfout_path = Path(args.wrfout)
-    if not wrfout_path.exists():
-        raise SystemExit(f"Missing wrfout file: {wrfout_path}")
+    if args.post_spec:
+        payload = load_json(args.post_spec)
+    else:
+        payload = default_post_spec(args.project_name)
+
+    normalized = normalize_post_spec(payload, project_name_fallback=args.project_name)
+    errors = validate_post_spec(normalized)
+    if errors:
+        raise SystemExit("\n".join(errors))
+
+    figure_spec = None
+    for candidate in normalized["figures"]:
+        if candidate.get("figure_id") == args.figure_id:
+            figure_spec = deepcopy(candidate)
+            break
+    if figure_spec is None:
+        raise SystemExit(f"Unknown figure_id: {args.figure_id}")
+
+    wrfout_paths = [Path(item) for item in args.wrfout]
+    for wrfout_path in wrfout_paths:
+        if not wrfout_path.exists():
+            raise SystemExit(f"Missing wrfout file: {wrfout_path}")
 
     output_path = Path(args.out)
-    product_spec = {
-        "product": args.product,
-        "label": None,
-        "inputs": {
-            "mode": "explicit_paths",
-            "paths": [posix_path(wrfout_path)],
-        },
-        "selectors": {
-            "domain": None,
-            "time_indices": [int(args.time_index)],
-            "time_range": {
-                "start": None,
-                "end": None,
-            },
-            "max_files": None,
-        },
-        "render": {
-            "format": (output_path.suffix.lstrip(".") or "png").lower(),
-            "title": args.title,
-            "colormap": args.colormap,
-            "dpi": int(args.dpi),
-        },
-        "output": {
+    figure_spec["inputs"] = {
+        "mode": "explicit_paths",
+        "paths": [posix_path(path) for path in wrfout_paths],
+    }
+    figure_spec.setdefault("render", {})
+    figure_spec["render"]["format"] = (output_path.suffix.lstrip(".") or "png").lower()
+    figure_spec.setdefault("output", {})
+    figure_spec["output"].update(
+        {
             "subdir": "",
             "file_stem": output_path.stem,
             "sidecar_json": True,
             "overwrite": True,
             "path": posix_path(output_path),
-        },
-        "options": {},
-    }
+        }
+    )
 
-    frames = enumerate_wrfout_frames([wrfout_path])
-    selected_frames = select_wrfout_frames(frames, product_spec["selectors"])
+    frames = enumerate_wrfout_frames(wrfout_paths)
+    selected_frames = select_wrfout_frames(frames, figure_spec.get("selectors"))
     if not selected_frames:
-        raise SystemExit(
-            f"No matching timesteps for {wrfout_path} at time_index={args.time_index}"
-        )
+        raise SystemExit("No matching frames after applying selectors")
 
-    payload = {
+    result = {
         "dry_run": bool(args.dry_run),
-        "artifacts": run_product_request(
-            product_spec,
+        "artifacts": run_figure_request(
+            figure_spec,
+            normalized["layer_defs"],
             selected_frames,
             output_path.parent,
             dry_run=bool(args.dry_run),
         ),
     }
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0
 
 

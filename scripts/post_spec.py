@@ -71,7 +71,7 @@ def default_layer_defs() -> dict[str, dict[str, Any]]:
     return {
         "terrain": {
             "source": {"kind": "wrf_native"},
-            "expr": "HGT",
+            "expr": "first(HGT)",
             "units": "m",
             "metadata": {
                 "description": "Terrain height from WRF output",
@@ -79,7 +79,7 @@ def default_layer_defs() -> dict[str, dict[str, Any]]:
         },
         "landmask": {
             "source": {"kind": "wrf_native"},
-            "expr": "LANDMASK",
+            "expr": "first(LANDMASK)",
             "units": None,
             "metadata": {
                 "description": "Land-sea mask from WRF output",
