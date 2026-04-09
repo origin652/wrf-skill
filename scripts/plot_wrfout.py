@@ -37,6 +37,15 @@ except ImportError:  # pragma: no cover
 TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
 DOMAIN_PATTERN = re.compile(r"(d\d{2})")
 DRAW_KINDS = {"raster", "contour", "categorical_fill"}
+SOURCE_KIND_ALIASES = {
+    "wrf_native": "wrf_native_2d",
+}
+SUPPORTED_SOURCE_KINDS = {
+    "wrf_native",
+    "wrf_native_2d",
+    "wrf_native_3d",
+    "wrf_diag",
+}
 FUNCTION_NAMES = {
     "sqrt",
     "abs",
@@ -306,6 +315,56 @@ def _load_2d_var(dataset: Dataset, name: str, time_index: int) -> tuple[np.ndarr
     if field.ndim != 2:
         raise ValueError(f"Expected 2D field for {name}, received ndim={field.ndim}")
     return field, getattr(variable, "units", None)
+
+
+def _resolve_level_index(level_selector: dict[str, Any] | None, level_count: int) -> int:
+    selector = level_selector if isinstance(level_selector, dict) else {}
+    mode = str(selector.get("mode") or "index").lower()
+    if mode == "first":
+        return 0
+    if mode == "last":
+        return level_count - 1
+    if mode != "index":
+        raise ValueError(f"Unsupported level_selector.mode: {mode}")
+    raw_index = selector.get("index", 0)
+    index = int(raw_index)
+    if index < 0 or index >= level_count:
+        raise ValueError(
+            f"level_selector.index={index} is out of range for available levels={level_count}"
+        )
+    return index
+
+
+def _load_3d_var(
+    dataset: Dataset,
+    name: str,
+    time_index: int,
+    *,
+    level_selector: dict[str, Any] | None,
+) -> tuple[np.ndarray, str | None]:
+    variable = dataset.variables.get(name)
+    if variable is None:
+        raise KeyError(f"Missing WRF variable: {name}")
+
+    raw = variable[time_index] if variable.ndim >= 4 else variable[:]
+    field = np.asarray(np.ma.filled(raw, np.nan), dtype=float)
+    if field.ndim != 3:
+        raise ValueError(
+            f"Expected 3D field for {name} before level selection, received ndim={field.ndim}"
+        )
+
+    level_index = _resolve_level_index(level_selector, int(field.shape[0]))
+    level_field = np.asarray(field[level_index], dtype=float)
+    if level_field.ndim != 2:
+        raise ValueError(
+            f"Expected 2D slice for {name} after level selection, received ndim={level_field.ndim}"
+        )
+    return level_field, getattr(variable, "units", None)
+
+
+def _normalize_source_kind(kind: str | None) -> str:
+    token = str(kind or "wrf_native").strip()
+    return SOURCE_KIND_ALIASES.get(token, token)
 
 
 def _serialize_frame(frame: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -688,6 +747,11 @@ class FigureEvaluator:
         self.parsed_defs = parsed_defs
         self.frames = frames
         self.variable_cache: dict[tuple[str, int, str], tuple[np.ndarray, str | None]] = {}
+        self.variable_3d_cache: dict[
+            tuple[str, int, str, str],
+            tuple[np.ndarray, str | None],
+        ] = {}
+        self.diagnostic_cache: dict[tuple[str, int, str], tuple[np.ndarray, str | None]] = {}
         self.layer_cache: dict[tuple[str, int | None], tuple[np.ndarray, str | None]] = {}
 
     def _cache_key(self, layer_id: str, current_frame: dict[str, Any] | None) -> tuple[str, int | None]:
@@ -710,6 +774,102 @@ class FigureEvaluator:
         self.variable_cache[key] = (field, units)
         return field, units
 
+    def load_variable_3d(
+        self,
+        frame: dict[str, Any],
+        name: str,
+        *,
+        level_selector: dict[str, Any] | None,
+    ) -> tuple[np.ndarray, str | None]:
+        selector_key = json.dumps(level_selector or {"mode": "index", "index": 0}, sort_keys=True)
+        key = (posix_path(frame["path"]), int(frame["time_index"]), name, selector_key)
+        cached = self.variable_3d_cache.get(key)
+        if cached is not None:
+            return cached
+
+        with Dataset(frame["path"]) as dataset:
+            field, units = _load_3d_var(
+                dataset,
+                name,
+                int(frame["time_index"]),
+                level_selector=level_selector,
+            )
+        self.variable_3d_cache[key] = (field, units)
+        return field, units
+
+    def load_diagnostic(
+        self,
+        frame: dict[str, Any],
+        name: str,
+    ) -> tuple[np.ndarray, str | None]:
+        key = (posix_path(frame["path"]), int(frame["time_index"]), name.lower())
+        cached = self.diagnostic_cache.get(key)
+        if cached is not None:
+            return cached
+
+        diag_name = name.lower()
+        payload: tuple[np.ndarray, str | None]
+        if diag_name in {"wind_speed_10m", "wind10m", "wind_speed10m"}:
+            u10, _ = self.load_variable(frame, "U10")
+            v10, _ = self.load_variable(frame, "V10")
+            payload = (np.sqrt(u10**2 + v10**2), "m s-1")
+        elif diag_name in {"wind_dir_10m", "winddir10m", "wind_direction_10m"}:
+            u10, _ = self.load_variable(frame, "U10")
+            v10, _ = self.load_variable(frame, "V10")
+            payload = ((270.0 - np.degrees(np.arctan2(v10, u10))) % 360.0, "deg")
+        elif diag_name in {"total_precip", "precip_total", "total_precipitation"}:
+            rainc, units = self.load_variable(frame, "RAINC")
+            rainnc, _ = self.load_variable(frame, "RAINNC")
+            payload = (rainc + rainnc, units or "mm")
+        elif diag_name in {"temp_c_2m", "t2_c", "temperature_2m_c"}:
+            t2, _ = self.load_variable(frame, "T2")
+            payload = (t2 - 273.15, "C")
+        elif diag_name in {"rh2", "relative_humidity_2m"}:
+            q2, _ = self.load_variable(frame, "Q2")
+            psfc, _ = self.load_variable(frame, "PSFC")
+            t2, _ = self.load_variable(frame, "T2")
+            epsilon = 0.622
+            vapor_pressure = q2 * psfc / np.maximum(epsilon + q2, 1.0e-12)
+            temp_c = t2 - 273.15
+            saturation = 611.2 * np.exp((17.67 * temp_c) / np.maximum(temp_c + 243.5, 1.0e-12))
+            rh = 100.0 * vapor_pressure / np.maximum(saturation, 1.0e-12)
+            payload = (np.clip(rh, 0.0, 100.0), "%")
+        else:
+            supported = [
+                "rh2",
+                "temp_c_2m",
+                "total_precip",
+                "wind_dir_10m",
+                "wind_speed_10m",
+            ]
+            raise ValueError(
+                f"Unsupported wrf_diag name: {name}. Supported diagnostics: {', '.join(sorted(supported))}"
+            )
+
+        self.diagnostic_cache[key] = payload
+        return payload
+
+    def resolve_external_name(
+        self,
+        frame: dict[str, Any],
+        name: str,
+        source: dict[str, Any],
+    ) -> tuple[np.ndarray, str | None]:
+        source_kind = _normalize_source_kind(str(source.get("kind") or "wrf_native"))
+        if source_kind == "wrf_native_2d":
+            return self.load_variable(frame, name)
+        if source_kind == "wrf_native_3d":
+            return self.load_variable_3d(
+                frame,
+                name,
+                level_selector=source.get("level_selector"),
+            )
+        if source_kind == "wrf_diag":
+            return self.load_diagnostic(frame, name)
+        raise NotImplementedError(
+            f"source.kind is recognized but not implemented yet: {source_kind}"
+        )
+
     def evaluate_layer(
         self,
         layer_id: str,
@@ -722,14 +882,14 @@ class FigureEvaluator:
 
         layer_def = self.layer_defs[layer_id]
         source = layer_def.get("source", {})
-        source_kind = str(source.get("kind") or "wrf_native")
-        if source_kind != "wrf_native":
+        source_kind = _normalize_source_kind(str(source.get("kind") or "wrf_native"))
+        if source_kind not in {_normalize_source_kind(kind) for kind in SUPPORTED_SOURCE_KINDS}:
             raise NotImplementedError(
                 f"source.kind is recognized but not implemented yet: {source_kind}"
             )
 
         field = _ensure_2d_field(
-            self._evaluate_node(self.parsed_defs[layer_id], current_frame),
+            self._evaluate_node(self.parsed_defs[layer_id], current_frame, source=source),
             label=f"layer_defs.{layer_id}",
         )
         units = layer_def.get("units")
@@ -738,23 +898,29 @@ class FigureEvaluator:
         self.layer_cache[cache_key] = payload
         return payload
 
-    def _evaluate_node(self, node: Any, current_frame: dict[str, Any]) -> Any:
+    def _evaluate_node(
+        self,
+        node: Any,
+        current_frame: dict[str, Any],
+        *,
+        source: dict[str, Any],
+    ) -> Any:
         if isinstance(node, NumberNode):
             return float(node.value)
         if isinstance(node, NameNode):
             if node.name in self.layer_defs:
                 return self.evaluate_layer(node.name, current_frame)[0]
-            return self.load_variable(current_frame, node.name)[0]
+            return self.resolve_external_name(current_frame, node.name, source)[0]
         if isinstance(node, UnaryOpNode):
-            value = self._evaluate_node(node.operand, current_frame)
+            value = self._evaluate_node(node.operand, current_frame, source=source)
             if node.op == "+":
                 return value
             if node.op == "-":
                 return -value
             raise ValueError(f"Unsupported unary operator: {node.op}")
         if isinstance(node, BinaryOpNode):
-            left = self._evaluate_node(node.left, current_frame)
-            right = self._evaluate_node(node.right, current_frame)
+            left = self._evaluate_node(node.left, current_frame, source=source)
+            right = self._evaluate_node(node.right, current_frame, source=source)
             if node.op == "+":
                 return left + right
             if node.op == "-":
@@ -773,17 +939,17 @@ class FigureEvaluator:
             if func == "current":
                 if len(node.args) != 1:
                     raise ValueError("current() expects exactly one argument")
-                return self._evaluate_node(node.args[0], current_frame)
+                return self._evaluate_node(node.args[0], current_frame, source=source)
             if func == "first":
                 if len(node.args) != 1:
                     raise ValueError("first() expects exactly one argument")
-                return self._evaluate_node(node.args[0], self.frames[0])
+                return self._evaluate_node(node.args[0], self.frames[0], source=source)
             if func == "last":
                 if len(node.args) != 1:
                     raise ValueError("last() expects exactly one argument")
-                return self._evaluate_node(node.args[0], self.frames[-1])
+                return self._evaluate_node(node.args[0], self.frames[-1], source=source)
 
-            args = [self._evaluate_node(arg, current_frame) for arg in node.args]
+            args = [self._evaluate_node(arg, current_frame, source=source) for arg in node.args]
             if func == "sqrt":
                 return np.sqrt(args[0])
             if func == "abs":
@@ -885,6 +1051,7 @@ def run_figure_request(
                 resolved_layers.append(
                     {
                         "layer_id": layer_id,
+                        "style_id": render_layer.get("style_id"),
                         "expr": str(layer_defs[layer_id].get("expr") or ""),
                         "source": deepcopy(layer_defs[layer_id].get("source") or {}),
                         "units": layer_defs[layer_id].get("units"),

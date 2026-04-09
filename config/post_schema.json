@@ -18,6 +18,12 @@
     "defaults": {
       "$ref": "#/$defs/defaults"
     },
+    "style_defs": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/draw"
+      }
+    },
     "layer_defs": {
       "type": "object",
       "minProperties": 1,
@@ -272,6 +278,24 @@
         "kind": {
           "type": "string",
           "minLength": 1
+        },
+        "level_selector": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "index",
+                "first",
+                "last"
+              ]
+            },
+            "index": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": true
         }
       },
       "additionalProperties": true
@@ -473,11 +497,14 @@
     "render_layer": {
       "type": "object",
       "required": [
-        "layer_id",
-        "draw"
+        "layer_id"
       ],
       "properties": {
         "layer_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "style_id": {
           "type": "string",
           "minLength": 1
         },
@@ -485,7 +512,19 @@
           "$ref": "#/$defs/draw"
         }
       },
-      "additionalProperties": true
+      "additionalProperties": true,
+      "anyOf": [
+        {
+          "required": [
+            "draw"
+          ]
+        },
+        {
+          "required": [
+            "style_id"
+          ]
+        }
+      ]
     },
     "figure": {
       "type": "object",

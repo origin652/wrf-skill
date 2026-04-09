@@ -68,17 +68,32 @@ def write_wrfout_netcdf(
     rainnc: list[np.ndarray],
     hgt: np.ndarray | None = None,
     landmask: np.ndarray | None = None,
+    extra_2d_fields: dict[str, tuple[list[np.ndarray], str | None]] | None = None,
+    extra_3d_fields: dict[str, tuple[list[np.ndarray], str | None]] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     sample = np.asarray(t2[0], dtype=float)
     terrain = np.asarray(hgt if hgt is not None else np.zeros_like(sample), dtype=float)
     mask = np.asarray(landmask if landmask is not None else np.ones_like(sample), dtype=float)
+    field_2d_defs = extra_2d_fields or {}
+    field_3d_defs = extra_3d_fields or {}
 
     with Dataset(path, "w", format="NETCDF4") as dataset:
         dataset.createDimension("Time", len(times))
         dataset.createDimension("south_north", sample.shape[0])
         dataset.createDimension("west_east", sample.shape[1])
         dataset.createDimension("DateStrLen", 19)
+        if field_3d_defs:
+            level_count = None
+            for values, _ in field_3d_defs.values():
+                shape = np.asarray(values[0], dtype=float).shape
+                if len(shape) != 3:
+                    raise ValueError("extra_3d_fields values must have shape (levels, y, x)")
+                if level_count is None:
+                    level_count = int(shape[0])
+                elif level_count != int(shape[0]):
+                    raise ValueError("extra_3d_fields must share the same vertical level count")
+            dataset.createDimension("bottom_top", int(level_count or 0))
         _write_times(dataset, times)
 
         def write_field(name: str, values: list[np.ndarray], units: str) -> None:
@@ -100,11 +115,25 @@ def write_wrfout_netcdf(
                 variable.units = units
             variable[:, :] = values
 
+        def write_field_3d(name: str, values: list[np.ndarray], units: str | None) -> None:
+            variable = dataset.createVariable(
+                name,
+                "f4",
+                ("Time", "bottom_top", "south_north", "west_east"),
+            )
+            if units is not None:
+                variable.units = units
+            variable[:, :, :, :] = np.stack(values, axis=0)
+
         write_field("T2", t2, "K")
         write_field("U10", u10, "m s-1")
         write_field("V10", v10, "m s-1")
         write_field("RAINC", rainc, "mm")
         write_field("RAINNC", rainnc, "mm")
+        for field_name, (values, units) in field_2d_defs.items():
+            write_field(field_name, values, units or "")
+        for field_name, (values, units) in field_3d_defs.items():
+            write_field_3d(field_name, values, units)
         write_static_field("HGT", terrain, "m")
         write_static_field("LANDMASK", mask, None)
 
@@ -140,6 +169,50 @@ def build_layer_defs() -> dict[str, dict]:
             "expr": "last(RAINC + RAINNC) - first(RAINC + RAINNC)",
             "units": "mm",
             "metadata": {"description": "Accumulated precipitation"},
+        },
+    }
+
+
+def build_style_defs() -> dict[str, dict]:
+    return {
+        "temperature_raster": {
+            "kind": "raster",
+            "alpha": 1.0,
+            "zorder": 10,
+            "style": {
+                "colormap": "coolwarm",
+                "show_colorbar": True,
+            },
+        },
+        "terrain_contours": {
+            "kind": "contour",
+            "alpha": 0.8,
+            "zorder": 20,
+            "style": {
+                "levels": [100, 200],
+                "colors": "black",
+                "linewidths": 0.5,
+            },
+        },
+        "landmask_fill": {
+            "kind": "categorical_fill",
+            "alpha": 0.5,
+            "zorder": 1,
+            "style": {
+                "categories": [
+                    {"value": 0, "color": "#1f77b4", "label": "water"},
+                    {"value": 1, "color": "#d8b365", "label": "land"},
+                ]
+            },
+        },
+        "precip_raster": {
+            "kind": "raster",
+            "alpha": 0.9,
+            "zorder": 10,
+            "style": {
+                "colormap": "Blues",
+                "show_colorbar": True,
+            },
         },
     }
 
@@ -271,6 +344,7 @@ class FigureRenderingTests(unittest.TestCase):
         self.assertEqual(sidecar["figure_id"], "surface_t2")
         self.assertEqual(sidecar["current_frame"]["valid_time"], "2024-07-20_00:00:00")
         self.assertEqual([layer["layer_id"] for layer in sidecar["resolved_layers"]], ["t2_c", "terrain"])
+        self.assertEqual(sidecar["resolved_layers"][0]["style_id"], "temperature_raster")
 
     def test_run_figure_request_current_semantics_emit_per_frame_artifacts(self) -> None:
         runs_dir = make_test_dir("_test_v2_current_semantics")
@@ -418,6 +492,145 @@ class FigureRenderingTests(unittest.TestCase):
         )
         self.assertAlmostEqual(sidecar["layer_summaries"]["accum_precip"]["mean"], 4.0)
 
+    def test_run_figure_request_supports_wrf_native_3d_layers(self) -> None:
+        runs_dir = make_test_dir("_test_v2_native_3d")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00", "2024-07-20_01:00:00"],
+            t2=[np.full((2, 2), 300.0), np.full((2, 2), 301.0)],
+            u10=[np.ones((2, 2)), np.ones((2, 2))],
+            v10=[np.ones((2, 2)), np.ones((2, 2))],
+            rainc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            extra_3d_fields={
+                "QVAPOR": (
+                    [
+                        np.array(
+                            [
+                                [[0.001, 0.001], [0.001, 0.001]],
+                                [[0.003, 0.003], [0.003, 0.003]],
+                            ]
+                        ),
+                        np.array(
+                            [
+                                [[0.0015, 0.0015], [0.0015, 0.0015]],
+                                [[0.004, 0.004], [0.004, 0.004]],
+                            ]
+                        ),
+                    ],
+                    "kg kg-1",
+                )
+            },
+        )
+
+        layer_defs = {
+            "qvapor_lvl1": {
+                "source": {
+                    "kind": "wrf_native_3d",
+                    "level_selector": {"mode": "index", "index": 1},
+                },
+                "expr": "QVAPOR * 1000",
+                "units": "g kg-1",
+                "metadata": {},
+            }
+        }
+        figure_spec = {
+            "figure_id": "qvapor_lvl1",
+            "render": {"format": "png", "title": "QVAPOR", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "qvapor-lvl1",
+                "sidecar_json": True,
+                "overwrite": True,
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_lvl1",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": False},
+                    },
+                }
+            ],
+        }
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [1]})
+        artifacts = run_figure_request(
+            figure_spec,
+            layer_defs,
+            selected_frames,
+            runs_dir,
+            dry_run=True,
+        )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertAlmostEqual(artifacts[0]["layer_summaries"]["qvapor_lvl1"]["mean"], 4.0, places=6)
+
+    def test_run_figure_request_supports_wrf_diag_layers(self) -> None:
+        runs_dir = make_test_dir("_test_v2_wrf_diag")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00", "2024-07-20_01:00:00"],
+            t2=[np.full((2, 2), 300.0), np.full((2, 2), 301.0)],
+            u10=[np.ones((2, 2)), np.ones((2, 2)) * 2.0],
+            v10=[np.ones((2, 2)) * 2.0, np.ones((2, 2)) * 3.0],
+            rainc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            rainnc=[np.full((2, 2), 1.0), np.full((2, 2), 5.0)],
+        )
+
+        layer_defs = {
+            "accum_precip_diag": {
+                "source": {"kind": "wrf_diag"},
+                "expr": "last(total_precip) - first(total_precip)",
+                "units": "mm",
+                "metadata": {},
+            }
+        }
+        figure_spec = {
+            "figure_id": "accum_precip_diag",
+            "render": {"format": "png", "title": "Accum Diag", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "accum-precip-diag",
+                "sidecar_json": True,
+                "overwrite": True,
+            },
+            "layers": [
+                {
+                    "layer_id": "accum_precip_diag",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "Blues", "show_colorbar": False},
+                    },
+                }
+            ],
+        }
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0, 1]})
+        artifacts = run_figure_request(
+            figure_spec,
+            layer_defs,
+            selected_frames,
+            runs_dir,
+            dry_run=True,
+        )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertIsNone(artifacts[0]["current_frame"])
+        self.assertAlmostEqual(artifacts[0]["layer_summaries"]["accum_precip_diag"]["mean"], 4.0)
+
 
 class WrfPostProjectTests(unittest.TestCase):
     def test_run_postprocess_registers_current_figure_artifacts(self) -> None:
@@ -452,6 +665,7 @@ class WrfPostProjectTests(unittest.TestCase):
                 {
                     "schema_version": 2,
                     "project_name": "demo",
+                    "style_defs": build_style_defs(),
                     "layer_defs": build_layer_defs(),
                     "figures": [
                         {
@@ -467,25 +681,12 @@ class WrfPostProjectTests(unittest.TestCase):
                             "layers": [
                                 {
                                     "layer_id": "t2_c",
-                                    "draw": {
-                                        "kind": "raster",
-                                        "alpha": 1.0,
-                                        "zorder": 10,
-                                        "style": {"colormap": "coolwarm", "show_colorbar": True},
-                                    },
+                                    "style_id": "temperature_raster",
                                 },
                                 {
                                     "layer_id": "terrain",
-                                    "draw": {
-                                        "kind": "contour",
-                                        "alpha": 0.7,
-                                        "zorder": 20,
-                                        "style": {
-                                            "levels": [100, 200],
-                                            "colors": "black",
-                                            "linewidths": 0.5,
-                                        },
-                                    },
+                                    "style_id": "terrain_contours",
+                                    "draw": {"alpha": 0.7},
                                 },
                             ],
                         }
@@ -511,6 +712,8 @@ class WrfPostProjectTests(unittest.TestCase):
             self.assertTrue(Path(artifact["sidecar_path"]).exists())
             self.assertIn(artifact["path"], state["artifacts"]["plots"])
             self.assertIn(f"output={artifact['path']}", log_text)
+            sidecar = load_json(Path(artifact["sidecar_path"]))
+            self.assertEqual(sidecar["resolved_layers"][0]["style_id"], "temperature_raster")
 
     def test_run_postprocess_real_project_v2_smoke(self) -> None:
         runs_dir = make_test_dir("_test_wrf_post_real_v2_smoke")
@@ -529,6 +732,7 @@ class WrfPostProjectTests(unittest.TestCase):
                 {
                     "schema_version": 2,
                     "project_name": "real-smoke",
+                    "style_defs": build_style_defs(),
                     "layer_defs": build_layer_defs(),
                     "figures": [
                         {
@@ -547,39 +751,17 @@ class WrfPostProjectTests(unittest.TestCase):
                             "layers": [
                                 {
                                     "layer_id": "landmask",
-                                    "draw": {
-                                        "kind": "categorical_fill",
-                                        "alpha": 0.4,
-                                        "zorder": 1,
-                                        "style": {
-                                            "categories": [
-                                                {"value": 0, "color": "#4c78a8", "label": "water"},
-                                                {"value": 1, "color": "#f2cf5b", "label": "land"},
-                                            ]
-                                        },
-                                    },
+                                    "style_id": "landmask_fill",
+                                    "draw": {"alpha": 0.4},
                                 },
                                 {
                                     "layer_id": "accum_precip",
-                                    "draw": {
-                                        "kind": "raster",
-                                        "alpha": 0.9,
-                                        "zorder": 10,
-                                        "style": {"colormap": "Blues", "show_colorbar": True},
-                                    },
+                                    "style_id": "precip_raster",
                                 },
                                 {
                                     "layer_id": "terrain",
-                                    "draw": {
-                                        "kind": "contour",
-                                        "alpha": 0.8,
-                                        "zorder": 20,
-                                        "style": {
-                                            "levels": [0, 500, 1000, 1500],
-                                            "colors": "black",
-                                            "linewidths": 0.5,
-                                        },
-                                    },
+                                    "style_id": "terrain_contours",
+                                    "draw": {"style": {"levels": [0, 500, 1000, 1500]}},
                                 },
                             ],
                         }
@@ -609,6 +791,7 @@ class WrfPostProjectTests(unittest.TestCase):
             [layer["draw"]["kind"] for layer in sidecar["resolved_layers"]],
             ["categorical_fill", "raster", "contour"],
         )
+        self.assertEqual(sidecar["resolved_layers"][0]["style_id"], "landmask_fill")
 
         state = load_json(project_root / "project.json")
         self.assertEqual(state["artifacts"]["plots"], [artifact["path"]])

@@ -176,16 +176,24 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 ## 后处理协议
 
 `post_spec.json` 是后处理和诊断请求的建议格式。
-规范形态是 `schema_version=2`，顶层包含 `defaults`、`layer_defs` 和 `figures`。
+规范形态是 `schema_version=2`，顶层包含 `defaults`、`style_defs`、`layer_defs` 和 `figures`。
 
 稳定部分：
 
 - `layer_defs`：可复用的数据图层定义，例如 `t2_c`、`wind10m`、`terrain`、`accum_precip`
+- `style_defs`：可复用的渲染样式定义，例如 raster、contour、categorical_fill 的公共样式
 - `figures[*].inputs`：输入文件解析方式
 - `figures[*].selectors`：时间和 domain 选择
 - `figures[*].render`：图级渲染默认值
 - `figures[*].output`：输出位置和 sidecar 行为
-- `figures[*].layers[*].draw`：每个图层自己的渲染样式和顺序
+- `figures[*].layers[*].style_id` 和 `figures[*].layers[*].draw`：复用样式以及单图层覆盖
+
+当前 `layer_defs[*].source.kind` 支持这几类：
+
+- `wrf_native_2d`：直接读取 WRF 原生二维变量
+- `wrf_native_3d`：读取 WRF 原生三维变量，并通过 `source.level_selector` 选层
+- `wrf_diag`：调用内置诊断量，例如 `wind_speed_10m`、`wind_dir_10m`、`total_precip`、`temp_c_2m`、`rh2`
+- `wrf_native`：仍然接受，作为 `wrf_native_2d` 的兼容别名
 
 生成一个起始 spec：
 
@@ -193,10 +201,22 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 python3 scripts/post_spec.py --project-name demo --output post_spec.json
 ```
 
+如果你想直接从一个更完整的 v2 示例开始，里面已经包含可复用 layer、逐时 figure 和范围图 figure，可以直接：
+
+```bash
+cp templates/post_spec.example.json post_spec.json
+```
+
 规范化并校验已有 spec：
 
 ```bash
 python3 scripts/post_spec.py --input post_spec.json --output post_spec.json
+```
+
+如果你想先看这份 spec 最终会被解释成什么执行计划，可以直接：
+
+```bash
+python3 scripts/post_spec.py --input post_spec.json --interpret
 ```
 
 如果你想直接从一个或多个 `wrfout` 文件渲染某个已定义的 figure，也可以：

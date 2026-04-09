@@ -175,16 +175,24 @@ If you only want preprocessing first, stop after `wrf-wps`.
 ## Post-processing Protocol
 
 `post_spec.json` is the intended request format for post-processing and diagnostics.
-The canonical shape is `schema_version=2` with top-level `defaults`, `layer_defs`, and `figures`.
+The canonical shape is `schema_version=2` with top-level `defaults`, `style_defs`, `layer_defs`, and `figures`.
 
 Stable sections:
 
 - `layer_defs` for reusable computed data layers such as `t2_c`, `wind10m`, `terrain`, and `accum_precip`
+- `style_defs` for reusable draw presets such as raster, contour, and categorical styling
 - `figures[*].inputs` for file resolution
 - `figures[*].selectors` for domain and time selection
 - `figures[*].render` for figure-level rendering defaults
 - `figures[*].output` for output location and sidecar behavior
-- `figures[*].layers[*].draw` for per-layer rendering style and ordering
+- `figures[*].layers[*].style_id` and `figures[*].layers[*].draw` for reusable styles plus per-layer overrides
+
+Current `layer_defs[*].source.kind` modes:
+
+- `wrf_native_2d` for direct 2D WRF variables
+- `wrf_native_3d` for 3D WRF variables with `source.level_selector`
+- `wrf_diag` for built-in diagnostics such as `wind_speed_10m`, `wind_dir_10m`, `total_precip`, `temp_c_2m`, and `rh2`
+- `wrf_native` is still accepted as an alias of `wrf_native_2d`
 
 Generate a starter spec:
 
@@ -192,10 +200,22 @@ Generate a starter spec:
 python3 scripts/post_spec.py --project-name demo --output post_spec.json
 ```
 
+If you want a fuller v2 example with reusable layers, a per-frame figure, and a range-only figure, start from:
+
+```bash
+cp templates/post_spec.example.json post_spec.json
+```
+
 Normalize and validate an existing spec:
 
 ```bash
 python3 scripts/post_spec.py --input post_spec.json --output post_spec.json
+```
+
+Interpret a spec into its resolved execution plan:
+
+```bash
+python3 scripts/post_spec.py --input post_spec.json --interpret
 ```
 
 Render a single named figure definition directly from one or more `wrfout` files:

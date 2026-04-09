@@ -1,0 +1,287 @@
+{
+  "schema_version": 2,
+  "project_name": "demo",
+  "defaults": {
+    "inputs": {
+      "mode": "project_artifacts",
+      "artifact": "wrfout_files"
+    },
+    "selectors": {
+      "domain": "d01",
+      "time_indices": null,
+      "time_range": {
+        "start": null,
+        "end": null
+      },
+      "max_files": null
+    },
+    "render": {
+      "format": "png",
+      "title": null,
+      "dpi": 150
+    },
+    "output": {
+      "subdir": "plots",
+      "file_stem": null,
+      "sidecar_json": true,
+      "overwrite": false
+    }
+  },
+  "style_defs": {
+    "temperature_raster": {
+      "kind": "raster",
+      "alpha": 1.0,
+      "zorder": 10,
+      "style": {
+        "colormap": "coolwarm",
+        "show_colorbar": true
+      }
+    },
+    "terrain_contours": {
+      "kind": "contour",
+      "alpha": 0.8,
+      "zorder": 20,
+      "style": {
+        "levels": [
+          0,
+          500,
+          1000,
+          1500,
+          2000
+        ],
+        "colors": "black",
+        "linewidths": 0.5
+      }
+    },
+    "precip_raster": {
+      "kind": "raster",
+      "alpha": 0.95,
+      "zorder": 10,
+      "style": {
+        "colormap": "Blues",
+        "show_colorbar": true
+      }
+    },
+    "wind_raster": {
+      "kind": "raster",
+      "alpha": 1.0,
+      "zorder": 10,
+      "style": {
+        "colormap": "viridis",
+        "show_colorbar": true
+      }
+    },
+    "moisture_raster": {
+      "kind": "raster",
+      "alpha": 1.0,
+      "zorder": 10,
+      "style": {
+        "colormap": "YlGnBu",
+        "show_colorbar": true
+      }
+    },
+    "landmask_fill": {
+      "kind": "categorical_fill",
+      "alpha": 0.35,
+      "zorder": 1,
+      "style": {
+        "categories": [
+          {
+            "value": 0,
+            "color": "#4c78a8",
+            "label": "water"
+          },
+          {
+            "value": 1,
+            "color": "#e0c36e",
+            "label": "land"
+          }
+        ]
+      }
+    }
+  },
+  "layer_defs": {
+    "terrain": {
+      "source": {
+        "kind": "wrf_native_2d"
+      },
+      "expr": "first(HGT)",
+      "units": "m",
+      "metadata": {
+        "description": "Terrain height from the first selected frame"
+      }
+    },
+    "landmask": {
+      "source": {
+        "kind": "wrf_native_2d"
+      },
+      "expr": "first(LANDMASK)",
+      "units": null,
+      "metadata": {
+        "description": "Static land-sea mask"
+      }
+    },
+    "t2_c": {
+      "source": {
+        "kind": "wrf_native_2d"
+      },
+      "expr": "T2 - 273.15",
+      "units": "C",
+      "metadata": {
+        "description": "2m temperature in Celsius"
+      }
+    },
+    "wind10m": {
+      "source": {
+        "kind": "wrf_diag"
+      },
+      "expr": "wind_speed_10m",
+      "units": "m s-1",
+      "metadata": {
+        "description": "10m wind speed magnitude from built-in diagnostics"
+      }
+    },
+    "qvapor_lvl0_gkg": {
+      "source": {
+        "kind": "wrf_native_3d",
+        "level_selector": {
+          "mode": "first"
+        }
+      },
+      "expr": "QVAPOR * 1000",
+      "units": "g kg-1",
+      "metadata": {
+        "description": "Lowest model-level water vapor mixing ratio"
+      }
+    },
+    "accum_precip": {
+      "source": {
+        "kind": "wrf_diag"
+      },
+      "expr": "last(total_precip) - first(total_precip)",
+      "units": "mm",
+      "metadata": {
+        "description": "Accumulated precipitation across the selected frame range"
+      }
+    }
+  },
+  "figures": [
+    {
+      "figure_id": "surface_temperature",
+      "selectors": {
+        "time_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "render": {
+        "title": "2m Temperature with Terrain"
+      },
+      "output": {
+        "file_stem": "surface-temperature"
+      },
+      "layers": [
+        {
+          "layer_id": "t2_c",
+          "style_id": "temperature_raster"
+        },
+        {
+          "layer_id": "terrain",
+          "style_id": "terrain_contours"
+        }
+      ]
+    },
+    {
+      "figure_id": "wind10m_diagnostic",
+      "selectors": {
+        "time_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "render": {
+        "title": "10m Wind Speed Diagnostic"
+      },
+      "output": {
+        "file_stem": "wind10m-diagnostic"
+      },
+      "layers": [
+        {
+          "layer_id": "wind10m",
+          "style_id": "wind_raster"
+        },
+        {
+          "layer_id": "terrain",
+          "style_id": "terrain_contours"
+        }
+      ]
+    },
+    {
+      "figure_id": "accum_precip_overview",
+      "selectors": {
+        "time_indices": [
+          0,
+          6
+        ]
+      },
+      "render": {
+        "title": "Accumulated Precipitation Overview"
+      },
+      "output": {
+        "file_stem": "accum-precip-overview"
+      },
+      "layers": [
+        {
+          "layer_id": "landmask",
+          "style_id": "landmask_fill"
+        },
+        {
+          "layer_id": "accum_precip",
+          "style_id": "precip_raster"
+        },
+        {
+          "layer_id": "terrain",
+          "style_id": "terrain_contours",
+          "draw": {
+            "style": {
+              "levels": [
+                0,
+                500,
+                1000,
+                1500
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "figure_id": "lowest_level_qvapor",
+      "selectors": {
+        "time_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "render": {
+        "title": "Lowest-Level Water Vapor"
+      },
+      "output": {
+        "file_stem": "lowest-level-qvapor"
+      },
+      "layers": [
+        {
+          "layer_id": "qvapor_lvl0_gkg",
+          "style_id": "moisture_raster"
+        },
+        {
+          "layer_id": "terrain",
+          "style_id": "terrain_contours"
+        }
+      ]
+    }
+  ]
+}

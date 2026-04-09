@@ -16,10 +16,17 @@ except ImportError:  # pragma: no cover
 DEFAULT_POST_SPEC_VERSION = 2
 ALLOWED_INPUT_MODES = {"project_artifacts", "explicit_paths", "glob"}
 DEFAULT_SECTION_KEYS = ("inputs", "selectors", "render", "output")
+SUPPORTED_SOURCE_KINDS = {
+    "wrf_native",
+    "wrf_native_2d",
+    "wrf_native_3d",
+    "wrf_diag",
+}
 ROOT_RESERVED_KEYS = {
     "schema_version",
     "project_name",
     "defaults",
+    "style_defs",
     "layer_defs",
     "figures",
 }
@@ -70,7 +77,7 @@ def default_post_defaults() -> dict[str, Any]:
 def default_layer_defs() -> dict[str, dict[str, Any]]:
     return {
         "terrain": {
-            "source": {"kind": "wrf_native"},
+            "source": {"kind": "wrf_native_2d"},
             "expr": "first(HGT)",
             "units": "m",
             "metadata": {
@@ -78,7 +85,7 @@ def default_layer_defs() -> dict[str, dict[str, Any]]:
             },
         },
         "landmask": {
-            "source": {"kind": "wrf_native"},
+            "source": {"kind": "wrf_native_2d"},
             "expr": "first(LANDMASK)",
             "units": None,
             "metadata": {
@@ -86,7 +93,7 @@ def default_layer_defs() -> dict[str, dict[str, Any]]:
             },
         },
         "t2_c": {
-            "source": {"kind": "wrf_native"},
+            "source": {"kind": "wrf_native_2d"},
             "expr": "T2 - 273.15",
             "units": "C",
             "metadata": {
@@ -94,19 +101,74 @@ def default_layer_defs() -> dict[str, dict[str, Any]]:
             },
         },
         "wind10m": {
-            "source": {"kind": "wrf_native"},
-            "expr": "sqrt(U10**2 + V10**2)",
+            "source": {"kind": "wrf_diag"},
+            "expr": "wind_speed_10m",
             "units": "m s-1",
             "metadata": {
-                "description": "10m wind speed magnitude",
+                "description": "10m wind speed magnitude from built-in diagnostics",
+            },
+        },
+        "qvapor_lvl0_gkg": {
+            "source": {
+                "kind": "wrf_native_3d",
+                "level_selector": {"mode": "first"},
+            },
+            "expr": "QVAPOR * 1000",
+            "units": "g kg-1",
+            "metadata": {
+                "description": "Lowest model-level water vapor mixing ratio in g kg-1",
             },
         },
         "accum_precip": {
-            "source": {"kind": "wrf_native"},
-            "expr": "last(RAINC + RAINNC) - first(RAINC + RAINNC)",
+            "source": {"kind": "wrf_diag"},
+            "expr": "last(total_precip) - first(total_precip)",
             "units": "mm",
             "metadata": {
                 "description": "Accumulated precipitation over the selected frame range",
+            },
+        },
+    }
+
+
+def default_style_defs() -> dict[str, dict[str, Any]]:
+    return {
+        "temperature_raster": {
+            "kind": "raster",
+            "alpha": 1.0,
+            "zorder": 10,
+            "style": {
+                "colormap": "coolwarm",
+                "show_colorbar": True,
+            },
+        },
+        "terrain_contours": {
+            "kind": "contour",
+            "alpha": 0.9,
+            "zorder": 20,
+            "style": {
+                "levels": [0, 500, 1000, 1500, 2000],
+                "colors": "black",
+                "linewidths": 0.5,
+            },
+        },
+        "precip_raster": {
+            "kind": "raster",
+            "alpha": 0.95,
+            "zorder": 10,
+            "style": {
+                "colormap": "Blues",
+                "show_colorbar": True,
+            },
+        },
+        "landmask_fill": {
+            "kind": "categorical_fill",
+            "alpha": 0.35,
+            "zorder": 1,
+            "style": {
+                "categories": [
+                    {"value": 0, "color": "#4c78a8", "label": "water"},
+                    {"value": 1, "color": "#e0c36e", "label": "land"},
+                ],
             },
         },
     }
@@ -133,28 +195,11 @@ def default_figure_spec() -> dict[str, Any]:
         "layers": [
             {
                 "layer_id": "t2_c",
-                "draw": {
-                    "kind": "raster",
-                    "alpha": 1.0,
-                    "zorder": 10,
-                    "style": {
-                        "colormap": "coolwarm",
-                        "show_colorbar": True,
-                    },
-                },
+                "style_id": "temperature_raster",
             },
             {
                 "layer_id": "terrain",
-                "draw": {
-                    "kind": "contour",
-                    "alpha": 0.9,
-                    "zorder": 20,
-                    "style": {
-                        "levels": [0, 500, 1000, 1500, 2000],
-                        "colors": "black",
-                        "linewidths": 0.5,
-                    },
-                },
+                "style_id": "terrain_contours",
             },
         ],
     }
@@ -165,6 +210,7 @@ def _empty_post_spec(project_name: str = "demo") -> dict[str, Any]:
         "schema_version": DEFAULT_POST_SPEC_VERSION,
         "project_name": project_name,
         "defaults": default_post_defaults(),
+        "style_defs": {},
         "layer_defs": {},
         "figures": [],
     }
@@ -176,6 +222,7 @@ def default_post_spec(project_name: str = "demo", *, product_name: str | None = 
         "schema_version": DEFAULT_POST_SPEC_VERSION,
         "project_name": project_name,
         "defaults": default_post_defaults(),
+        "style_defs": default_style_defs(),
         "layer_defs": default_layer_defs(),
         "figures": [default_figure_spec()],
     }
@@ -219,45 +266,71 @@ def _normalize_layer_def(raw_layer: Any) -> dict[str, Any]:
     return normalized
 
 
-def _normalize_draw(raw_draw: Any) -> dict[str, Any]:
+def _normalize_draw(raw_draw: Any, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
     normalized: dict[str, Any] = {
         "kind": None,
         "alpha": 1.0,
         "zorder": None,
         "style": {},
     }
+    if isinstance(base, dict):
+        normalized = deep_merge(normalized, deepcopy(base))
     if not isinstance(raw_draw, dict):
         return normalized
 
     for key, value in raw_draw.items():
         if key not in {"kind", "alpha", "zorder", "style"}:
             normalized[key] = deepcopy(value)
-    normalized["kind"] = raw_draw.get("kind")
-    normalized["alpha"] = raw_draw.get("alpha", 1.0)
-    normalized["zorder"] = raw_draw.get("zorder")
+    if "kind" in raw_draw:
+        normalized["kind"] = raw_draw.get("kind")
+    if "alpha" in raw_draw:
+        normalized["alpha"] = raw_draw.get("alpha")
+    if "zorder" in raw_draw:
+        normalized["zorder"] = raw_draw.get("zorder")
     style = raw_draw.get("style")
-    normalized["style"] = deepcopy(style) if isinstance(style, dict) else {}
+    if isinstance(style, dict):
+        normalized["style"] = deep_merge(normalized["style"], style)
+    elif "style" in raw_draw:
+        normalized["style"] = {}
     return normalized
 
 
-def _normalize_render_layer(raw_layer: Any) -> dict[str, Any]:
+def _normalize_style_def(raw_style: Any) -> dict[str, Any]:
+    return _normalize_draw(raw_style)
+
+
+def _normalize_render_layer(
+    raw_layer: Any,
+    style_defs: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     normalized: dict[str, Any] = {
         "layer_id": None,
+        "style_id": None,
         "draw": _normalize_draw({}),
     }
     if not isinstance(raw_layer, dict):
         normalized["layer_id"] = str(raw_layer)
         return normalized
 
+    style_id = raw_layer.get("style_id")
+    base_style = {}
+    if isinstance(style_id, str) and style_id in style_defs:
+        base_style = style_defs[style_id]
+
     for key, value in raw_layer.items():
-        if key not in {"layer_id", "draw"}:
+        if key not in {"layer_id", "style_id", "draw"}:
             normalized[key] = deepcopy(value)
     normalized["layer_id"] = raw_layer.get("layer_id")
-    normalized["draw"] = _normalize_draw(raw_layer.get("draw"))
+    normalized["style_id"] = style_id
+    normalized["draw"] = _normalize_draw(raw_layer.get("draw"), base=base_style)
     return normalized
 
 
-def _normalize_figure(raw_figure: Any, defaults: dict[str, Any]) -> dict[str, Any]:
+def _normalize_figure(
+    raw_figure: Any,
+    defaults: dict[str, Any],
+    style_defs: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     base = {
         "figure_id": None,
         "inputs": deep_merge(default_post_defaults()["inputs"], defaults.get("inputs", {})),
@@ -292,7 +365,7 @@ def _normalize_figure(raw_figure: Any, defaults: dict[str, Any]) -> dict[str, An
 
     raw_layers = raw_figure.get("layers")
     if isinstance(raw_layers, list):
-        normalized["layers"] = [_normalize_render_layer(item) for item in raw_layers]
+        normalized["layers"] = [_normalize_render_layer(item, style_defs) for item in raw_layers]
     else:
         normalized["layers"] = []
     return normalized
@@ -322,6 +395,13 @@ def normalize_post_spec(
     elif raw_defaults is not None:
         normalized["defaults"] = deepcopy(raw_defaults)
 
+    raw_style_defs = incoming.get("style_defs")
+    if isinstance(raw_style_defs, dict):
+        normalized["style_defs"] = {
+            str(style_id): _normalize_style_def(style_def)
+            for style_id, style_def in raw_style_defs.items()
+        }
+
     raw_layer_defs = incoming.get("layer_defs")
     if isinstance(raw_layer_defs, dict):
         normalized["layer_defs"] = {
@@ -331,9 +411,10 @@ def normalize_post_spec(
 
     raw_figures = incoming.get("figures")
     defaults = normalized["defaults"] if isinstance(normalized["defaults"], dict) else {}
+    style_defs = normalized["style_defs"] if isinstance(normalized["style_defs"], dict) else {}
     if isinstance(raw_figures, list):
         normalized["figures"] = [
-            _normalize_figure(item, defaults)
+            _normalize_figure(item, defaults, style_defs)
             for item in raw_figures
         ]
 
@@ -494,6 +575,22 @@ def _validate_layer_def(layer_id: str, layer_def: Any, errors: list[str]) -> Non
         kind = source.get("kind")
         if not isinstance(kind, str) or not kind.strip():
             errors.append(f"{prefix}.source.kind must be a non-empty string")
+        elif kind == "wrf_native_3d":
+            level_selector = source.get("level_selector")
+            if not isinstance(level_selector, dict):
+                errors.append(f"{prefix}.source.level_selector must be an object for wrf_native_3d")
+            else:
+                mode = level_selector.get("mode")
+                if mode not in {"index", "first", "last"}:
+                    errors.append(
+                        f"{prefix}.source.level_selector.mode must be one of first, index, last"
+                    )
+                if mode == "index":
+                    index = level_selector.get("index")
+                    if not isinstance(index, int) or index < 0:
+                        errors.append(
+                            f"{prefix}.source.level_selector.index must be a non-negative integer for mode=index"
+                        )
 
     expr = layer_def.get("expr")
     if not isinstance(expr, str) or not expr.strip():
@@ -506,6 +603,14 @@ def _validate_layer_def(layer_id: str, layer_def: Any, errors: list[str]) -> Non
     metadata = layer_def.get("metadata")
     if not isinstance(metadata, dict):
         errors.append(f"{prefix}.metadata must be an object")
+
+
+def _validate_style_def(style_id: str, style_def: Any, errors: list[str]) -> None:
+    prefix = f"style_defs.{style_id}"
+    if not style_id.strip():
+        errors.append("style_defs keys must be non-empty strings")
+        return
+    _validate_draw(style_def, prefix, errors)
 
 
 def _validate_draw(draw: Any, prefix: str, errors: list[str]) -> None:
@@ -572,6 +677,16 @@ def validate_post_spec(spec: dict[str, Any]) -> list[str]:
 
     _validate_defaults(spec.get("defaults"), errors)
 
+    style_defs = spec.get("style_defs")
+    if style_defs is None:
+        style_defs = {}
+    elif not isinstance(style_defs, dict):
+        errors.append("style_defs must be an object when provided")
+        style_defs = {}
+    else:
+        for style_id, style_def in style_defs.items():
+            _validate_style_def(str(style_id), style_def, errors)
+
     layer_defs = spec.get("layer_defs")
     if not isinstance(layer_defs, dict) or not layer_defs:
         errors.append("layer_defs must be a non-empty object")
@@ -615,9 +730,150 @@ def validate_post_spec(spec: dict[str, Any]) -> list[str]:
                 errors.append(f"{layer_prefix}.layer_id must be a non-empty string")
             elif layer_id not in layer_defs:
                 errors.append(f"{layer_prefix}.layer_id references unknown layer_defs key: {layer_id}")
+            style_id = layer.get("style_id")
+            if style_id is not None:
+                if not isinstance(style_id, str) or not style_id.strip():
+                    errors.append(f"{layer_prefix}.style_id must be a non-empty string or null")
+                elif style_id not in style_defs:
+                    errors.append(f"{layer_prefix}.style_id references unknown style_defs key: {style_id}")
             _validate_draw(layer.get("draw"), f"{layer_prefix}.draw", errors)
 
     return errors
+
+
+def _runtime_symbols() -> dict[str, Any]:
+    try:
+        from plot_wrfout import (
+            BinaryOpNode,
+            CallNode,
+            NameNode,
+            NumberNode,
+            UnaryOpNode,
+            layer_uses_current,
+            parse_formula,
+            resolve_layer_dependencies,
+        )
+    except ImportError:  # pragma: no cover
+        from .plot_wrfout import (
+            BinaryOpNode,
+            CallNode,
+            NameNode,
+            NumberNode,
+            UnaryOpNode,
+            layer_uses_current,
+            parse_formula,
+            resolve_layer_dependencies,
+        )
+
+    return {
+        "BinaryOpNode": BinaryOpNode,
+        "CallNode": CallNode,
+        "NameNode": NameNode,
+        "NumberNode": NumberNode,
+        "UnaryOpNode": UnaryOpNode,
+        "layer_uses_current": layer_uses_current,
+        "parse_formula": parse_formula,
+        "resolve_layer_dependencies": resolve_layer_dependencies,
+    }
+
+
+def _collect_interpret_refs(node: Any, known_layers: set[str], runtime: dict[str, Any]) -> set[str]:
+    if isinstance(node, runtime["NumberNode"]):
+        return set()
+    if isinstance(node, runtime["NameNode"]):
+        return {node.name} if node.name in known_layers else set()
+    if isinstance(node, runtime["UnaryOpNode"]):
+        return _collect_interpret_refs(node.operand, known_layers, runtime)
+    if isinstance(node, runtime["BinaryOpNode"]):
+        return _collect_interpret_refs(node.left, known_layers, runtime) | _collect_interpret_refs(
+            node.right,
+            known_layers,
+            runtime,
+        )
+    if isinstance(node, runtime["CallNode"]):
+        refs: set[str] = set()
+        for arg in node.args:
+            refs |= _collect_interpret_refs(arg, known_layers, runtime)
+        return refs
+    raise TypeError(f"Unsupported AST node: {type(node)!r}")
+
+
+def interpret_post_spec(
+    spec: dict[str, Any],
+    *,
+    project_name_fallback: str | None = None,
+    figure_id: str | None = None,
+) -> dict[str, Any]:
+    normalized = normalize_post_spec(spec, project_name_fallback=project_name_fallback)
+    errors = validate_post_spec(normalized)
+    if errors:
+        raise ValueError("Invalid post spec: " + "; ".join(errors))
+
+    figures = list(normalized["figures"])
+    if figure_id is not None:
+        figures = [figure for figure in figures if figure.get("figure_id") == figure_id]
+        if not figures:
+            raise ValueError(f"Unknown figure_id: {figure_id}")
+
+    runtime = _runtime_symbols()
+    layer_defs = normalized["layer_defs"]
+    known_layers = set(layer_defs)
+    interpreted_figures: list[dict[str, Any]] = []
+    for figure in figures:
+        root_layer_ids = [str(layer["layer_id"]) for layer in figure.get("layers", [])]
+        parsed_defs, dependency_order = runtime["resolve_layer_dependencies"](layer_defs, root_layer_ids)
+        usage_memo: dict[str, bool] = {}
+
+        resolved_layers: list[dict[str, Any]] = []
+        for render_layer in figure.get("layers", []):
+            layer_id = str(render_layer["layer_id"])
+            parsed = parsed_defs[layer_id]
+            resolved_layers.append(
+                {
+                    "layer_id": layer_id,
+                    "style_id": render_layer.get("style_id"),
+                    "expr": str(layer_defs[layer_id].get("expr") or ""),
+                    "units": layer_defs[layer_id].get("units"),
+                    "source_kind": str(layer_defs[layer_id].get("source", {}).get("kind") or "wrf_native"),
+                    "source": deepcopy(layer_defs[layer_id].get("source") or {}),
+                    "depends_on": sorted(_collect_interpret_refs(parsed, known_layers, runtime)),
+                    "uses_current": bool(
+                        runtime["layer_uses_current"](layer_id, parsed_defs, memo=usage_memo)
+                    ),
+                    "draw": deepcopy(render_layer.get("draw") or {}),
+                }
+            )
+
+        figure_uses_current = any(item["uses_current"] for item in resolved_layers)
+        interpreted_figures.append(
+            {
+                "figure_id": figure["figure_id"],
+                "output_mode": "per_frame" if figure_uses_current else "frame_range",
+                "render_layer_order": root_layer_ids,
+                "dependency_order": dependency_order,
+                "resolved_layers": resolved_layers,
+                "inputs": deepcopy(figure.get("inputs") or {}),
+                "selectors": deepcopy(figure.get("selectors") or {}),
+                "render": deepcopy(figure.get("render") or {}),
+                "output": deepcopy(figure.get("output") or {}),
+            }
+        )
+
+    return {
+        "schema_version": normalized["schema_version"],
+        "project_name": normalized["project_name"],
+        "style_defs": deepcopy(normalized.get("style_defs") or {}),
+        "layer_defs": {
+            layer_id: {
+                "expr": layer_def.get("expr"),
+                "units": layer_def.get("units"),
+                "source_kind": str(layer_def.get("source", {}).get("kind") or "wrf_native"),
+                "source": deepcopy(layer_def.get("source") or {}),
+            }
+            for layer_id, layer_def in layer_defs.items()
+        },
+        "figures": interpreted_figures,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -642,6 +898,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Validate only and do not emit normalized JSON.",
     )
+    parser.add_argument(
+        "--interpret",
+        action="store_true",
+        help="Emit an interpreted execution plan instead of normalized JSON.",
+    )
+    parser.add_argument(
+        "--figure-id",
+        help="Optional figure filter used with --interpret.",
+    )
     return parser
 
 
@@ -659,13 +924,21 @@ def main(argv: list[str] | None = None) -> int:
             print(error, file=sys.stderr)
         return 2
 
-    if args.check:
+    if args.check and not args.interpret:
         return 0
 
+    emitted: dict[str, Any] = normalized
+    if args.interpret:
+        emitted = interpret_post_spec(
+            payload,
+            project_name_fallback=args.project_name,
+            figure_id=args.figure_id,
+        )
+
     if args.output:
-        dump_json(args.output, normalized)
+        dump_json(args.output, emitted)
     else:
-        print(json.dumps(normalized, indent=2, ensure_ascii=False))
+        print(json.dumps(emitted, indent=2, ensure_ascii=False))
     return 0
 
 
