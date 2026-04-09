@@ -71,6 +71,18 @@
         "show_colorbar": true
       }
     },
+    "wind_quiver": {
+      "kind": "vector",
+      "alpha": 0.9,
+      "zorder": 30,
+      "style": {
+        "mode": "quiver",
+        "stride": 4,
+        "scale": 80,
+        "color": "black",
+        "pivot": "mid"
+      }
+    },
     "moisture_raster": {
       "kind": "raster",
       "alpha": 1.0,
@@ -139,6 +151,26 @@
       "units": "m s-1",
       "metadata": {
         "description": "10m wind speed magnitude from built-in diagnostics"
+      }
+    },
+    "u10": {
+      "source": {
+        "kind": "wrf_native_2d"
+      },
+      "expr": "U10",
+      "units": "m s-1",
+      "metadata": {
+        "description": "10m zonal wind component"
+      }
+    },
+    "v10": {
+      "source": {
+        "kind": "wrf_native_2d"
+      },
+      "expr": "V10",
+      "units": "m s-1",
+      "metadata": {
+        "description": "10m meridional wind component"
       }
     },
     "qvapor_lvl0_gkg": {
@@ -254,6 +286,37 @@
               ]
             }
           }
+        }
+      ]
+    },
+    {
+      "figure_id": "surface_wind_vectors",
+      "selectors": {
+        "time_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "render": {
+        "title": "2m Temperature with 10m Wind Vectors"
+      },
+      "output": {
+        "file_stem": "surface-wind-vectors"
+      },
+      "layers": [
+        {
+          "layer_id": "t2_c",
+          "style_id": "temperature_raster"
+        },
+        {
+          "u_layer_id": "u10",
+          "v_layer_id": "v10",
+          "style_id": "wind_quiver"
+        },
+        {
+          "layer_id": "terrain",
+          "style_id": "terrain_contours"
         }
       ]
     },

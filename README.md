@@ -180,12 +180,18 @@ The canonical shape is `schema_version=2` with top-level `defaults`, `style_defs
 Stable sections:
 
 - `layer_defs` for reusable computed data layers such as `t2_c`, `wind10m`, `terrain`, and `accum_precip`
-- `style_defs` for reusable draw presets such as raster, contour, and categorical styling
+- `style_defs` for reusable draw presets such as raster, contour, categorical, and vector styling
 - `figures[*].inputs` for file resolution
 - `figures[*].selectors` for domain and time selection
 - `figures[*].render` for figure-level rendering defaults
 - `figures[*].output` for output location and sidecar behavior
 - `figures[*].layers[*].style_id` and `figures[*].layers[*].draw` for reusable styles plus per-layer overrides
+
+Render-layer shapes:
+
+- scalar layers use `layer_id`
+- vector layers use `u_layer_id` plus `v_layer_id` with `draw.kind=vector`
+- the current vector renderer supports `style.mode=quiver`
 
 Current `layer_defs[*].source.kind` modes:
 
@@ -205,6 +211,8 @@ If you want a fuller v2 example with reusable layers, a per-frame figure, and a 
 ```bash
 cp templates/post_spec.example.json post_spec.json
 ```
+
+That example also includes a vector figure using reusable scalar `u10` and `v10` layers plus a `wind_quiver` style preset.
 
 Normalize and validate an existing spec:
 

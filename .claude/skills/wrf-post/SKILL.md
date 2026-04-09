@@ -16,11 +16,13 @@ Treat `post_spec.json` as the authoritative request when present. The canonical 
 5. Run project-level post-processing with `python3 scripts/wrf_post.py --project-name <project> [--post-spec <path>]`.
 6. For one-off rendering of a single figure definition, use `python3 scripts/plot_wrfout.py --wrfout <path> [<path> ...] --figure-id <figure_id> --post-spec <path> --out <png>`.
 7. Define reusable data layers in `layer_defs`; define reusable draw presets in `style_defs`; define actual outputs in `figures`.
-8. Use `layer_defs[*].source.kind=wrf_native_2d` for direct 2D fields, `wrf_native_3d` with `source.level_selector` for 3D slices, and `wrf_diag` for built-in diagnostics such as `wind_speed_10m`, `wind_dir_10m`, `total_precip`, `temp_c_2m`, and `rh2`.
-9. Read `project.json` only to resolve implicit WRF outputs when `figures[*].inputs.mode=project_artifacts`.
-10. Keep stable protocol sections in `defaults`, `style_defs`, `layer_defs`, `figures[*].inputs`, `figures[*].selectors`, `figures[*].render`, and `figures[*].output`.
-11. Save generated plots to `runs/<project>/output/plots/`.
-12. Record generated plot paths in `project.json.artifacts.plots`.
+8. Scalar render layers use `layer_id`; vector render layers use `u_layer_id` plus `v_layer_id` with `draw.kind=vector`.
+9. The current vector renderer supports `style.mode=quiver`.
+10. Use `layer_defs[*].source.kind=wrf_native_2d` for direct 2D fields, `wrf_native_3d` with `source.level_selector` for 3D slices, and `wrf_diag` for built-in diagnostics such as `wind_speed_10m`, `wind_dir_10m`, `total_precip`, `temp_c_2m`, and `rh2`.
+11. Read `project.json` only to resolve implicit WRF outputs when `figures[*].inputs.mode=project_artifacts`.
+12. Keep stable protocol sections in `defaults`, `style_defs`, `layer_defs`, `figures[*].inputs`, `figures[*].selectors`, `figures[*].render`, and `figures[*].output`.
+13. Save generated plots to `runs/<project>/output/plots/`.
+14. Record generated plot paths in `project.json.artifacts.plots`.
 
 ## Files
 

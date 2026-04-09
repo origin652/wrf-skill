@@ -164,6 +164,18 @@ def build_layer_defs() -> dict[str, dict]:
             "units": "m s-1",
             "metadata": {"description": "10m wind speed"},
         },
+        "u10": {
+            "source": {"kind": "wrf_native"},
+            "expr": "U10",
+            "units": "m s-1",
+            "metadata": {"description": "10m zonal wind"},
+        },
+        "v10": {
+            "source": {"kind": "wrf_native"},
+            "expr": "V10",
+            "units": "m s-1",
+            "metadata": {"description": "10m meridional wind"},
+        },
         "accum_precip": {
             "source": {"kind": "wrf_native"},
             "expr": "last(RAINC + RAINNC) - first(RAINC + RAINNC)",
@@ -212,6 +224,18 @@ def build_style_defs() -> dict[str, dict]:
             "style": {
                 "colormap": "Blues",
                 "show_colorbar": True,
+            },
+        },
+        "wind_quiver": {
+            "kind": "vector",
+            "alpha": 0.9,
+            "zorder": 30,
+            "style": {
+                "mode": "quiver",
+                "stride": 1,
+                "scale": 30,
+                "color": "black",
+                "pivot": "mid",
             },
         },
     }
@@ -630,6 +654,78 @@ class FigureRenderingTests(unittest.TestCase):
         self.assertEqual(len(artifacts), 1)
         self.assertIsNone(artifacts[0]["current_frame"])
         self.assertAlmostEqual(artifacts[0]["layer_summaries"]["accum_precip_diag"]["mean"], 4.0)
+
+    def test_run_figure_request_supports_vector_quiver_layers(self) -> None:
+        runs_dir = make_test_dir("_test_v2_vector_quiver")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00"],
+            t2=[np.array([[300.0, 301.0], [302.0, 303.0]])],
+            u10=[np.full((2, 2), 3.0)],
+            v10=[np.full((2, 2), 4.0)],
+            rainc=[np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2))],
+            hgt=np.array([[100.0, 150.0], [200.0, 250.0]]),
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0]})
+        output_path = runs_dir / "surface-wind-vectors.png"
+        figure_spec = {
+            "figure_id": "surface_wind_vectors",
+            "render": {"format": "png", "title": "Surface Wind Vectors", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "surface-wind-vectors",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "t2_c",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "coolwarm", "show_colorbar": False},
+                    },
+                },
+                {
+                    "u_layer_id": "u10",
+                    "v_layer_id": "v10",
+                    "style_id": "wind_quiver",
+                    "draw": build_style_defs()["wind_quiver"],
+                },
+            ],
+        }
+
+        artifacts = run_figure_request(
+            figure_spec,
+            build_layer_defs(),
+            selected_frames,
+            runs_dir,
+            dry_run=False,
+        )
+
+        self.assertEqual(len(artifacts), 1)
+        artifact = artifacts[0]
+        self.assertTrue(Path(artifact["path"]).exists())
+        self.assertTrue(Path(artifact["sidecar_path"]).exists())
+        self.assertIsNotNone(artifact["current_frame"])
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(
+            [layer["draw"]["kind"] for layer in sidecar["resolved_layers"]],
+            ["raster", "vector"],
+        )
+        self.assertEqual(sidecar["resolved_layers"][1]["u_layer_id"], "u10")
+        self.assertEqual(sidecar["resolved_layers"][1]["v_layer_id"], "v10")
+        self.assertAlmostEqual(sidecar["resolved_layers"][1]["magnitude_summary"]["mean"], 5.0)
+        self.assertAlmostEqual(sidecar["layer_summaries"]["u10"]["mean"], 3.0)
+        self.assertAlmostEqual(sidecar["layer_summaries"]["v10"]["mean"], 4.0)
 
 
 class WrfPostProjectTests(unittest.TestCase):

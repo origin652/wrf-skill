@@ -181,12 +181,18 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 稳定部分：
 
 - `layer_defs`：可复用的数据图层定义，例如 `t2_c`、`wind10m`、`terrain`、`accum_precip`
-- `style_defs`：可复用的渲染样式定义，例如 raster、contour、categorical_fill 的公共样式
+- `style_defs`：可复用的渲染样式定义，例如 raster、contour、categorical_fill、vector 的公共样式
 - `figures[*].inputs`：输入文件解析方式
 - `figures[*].selectors`：时间和 domain 选择
 - `figures[*].render`：图级渲染默认值
 - `figures[*].output`：输出位置和 sidecar 行为
 - `figures[*].layers[*].style_id` 和 `figures[*].layers[*].draw`：复用样式以及单图层覆盖
+
+`figures[*].layers[*]` 目前有两种形态：
+
+- 标量图层：使用 `layer_id`
+- 矢量图层：使用 `u_layer_id` 和 `v_layer_id`，同时 `draw.kind=vector`
+- 当前矢量渲染器先支持 `style.mode=quiver`
 
 当前 `layer_defs[*].source.kind` 支持这几类：
 
@@ -206,6 +212,8 @@ python3 scripts/post_spec.py --project-name demo --output post_spec.json
 ```bash
 cp templates/post_spec.example.json post_spec.json
 ```
+
+这个示例里也已经带了一个矢量图示例，使用可复用的 `u10`、`v10` 标量 layer，再通过 `wind_quiver` 样式组合成风矢量。
 
 规范化并校验已有 spec：
 

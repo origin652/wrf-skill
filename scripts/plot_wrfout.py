@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover
 
 TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
 DOMAIN_PATTERN = re.compile(r"(d\d{2})")
-DRAW_KINDS = {"raster", "contour", "categorical_fill"}
+DRAW_KINDS = {"raster", "contour", "categorical_fill", "vector"}
 SOURCE_KIND_ALIASES = {
     "wrf_native": "wrf_native_2d",
 }
@@ -402,6 +402,7 @@ def _default_zorder(kind: str) -> int:
         "categorical_fill": 3,
         "raster": 10,
         "contour": 20,
+        "vector": 30,
     }.get(kind, 10)
 
 
@@ -545,6 +546,40 @@ def _render_categorical_fill(axis: Any, field: np.ndarray, *, draw: dict[str, An
     )
 
 
+def _render_vector(
+    axis: Any,
+    u_field: np.ndarray,
+    v_field: np.ndarray,
+    *,
+    draw: dict[str, Any],
+) -> None:
+    if u_field.shape != v_field.shape:
+        raise ValueError(
+            "Vector render layers require u and v fields with matching shapes"
+        )
+
+    style = draw.get("style", {})
+    stride = int(style.get("stride") or 1)
+    sample = (slice(None, None, stride), slice(None, None, stride))
+    y_coords, x_coords = np.mgrid[0 : u_field.shape[0], 0 : u_field.shape[1]]
+    quiver_kwargs: dict[str, Any] = {
+        "angles": "xy",
+        "alpha": float(draw.get("alpha", 1.0)),
+        "color": style.get("color", "black"),
+        "pivot": style.get("pivot", "mid"),
+        "zorder": float(draw.get("zorder") or _default_zorder("vector")),
+    }
+    if style.get("scale") is not None:
+        quiver_kwargs["scale"] = float(style["scale"])
+    axis.quiver(
+        x_coords[sample],
+        y_coords[sample],
+        u_field[sample],
+        v_field[sample],
+        **quiver_kwargs,
+    )
+
+
 def _render_layer(
     axis: Any,
     figure: Any,
@@ -564,6 +599,22 @@ def _render_layer(
         _render_categorical_fill(axis, field, draw=draw)
         return
     raise ValueError(f"Unsupported draw.kind: {kind}")
+
+
+def _render_layer_target_ids(render_layer: dict[str, Any]) -> list[str]:
+    draw = render_layer.get("draw")
+    kind = str(draw.get("kind") or "") if isinstance(draw, dict) else ""
+    if kind == "vector":
+        target_ids: list[str] = []
+        for key in ("u_layer_id", "v_layer_id"):
+            value = render_layer.get(key)
+            if isinstance(value, str) and value.strip() and value not in target_ids:
+                target_ids.append(value)
+        return target_ids
+    value = render_layer.get("layer_id")
+    if isinstance(value, str) and value.strip():
+        return [value]
+    return []
 
 
 def _make_number(tokens: pp.ParseResults) -> NumberNode:
@@ -991,7 +1042,11 @@ def run_figure_request(
     if not frames:
         raise ValueError("No frames selected for figure rendering")
 
-    root_layer_ids = [str(layer["layer_id"]) for layer in figure_spec.get("layers", [])]
+    root_layer_ids: list[str] = []
+    for render_layer in figure_spec.get("layers", []):
+        for layer_id in _render_layer_target_ids(render_layer):
+            if layer_id not in root_layer_ids:
+                root_layer_ids.append(layer_id)
     parsed_defs, _ = resolve_layer_dependencies(layer_defs, root_layer_ids)
     usage_memo: dict[str, bool] = {}
     uses_current = any(
@@ -1044,8 +1099,51 @@ def run_figure_request(
                 axis.set_title(title)
 
             for render_layer in figure_spec.get("layers", []):
-                layer_id = str(render_layer["layer_id"])
                 draw = render_layer["draw"]
+                if str(draw.get("kind") or "") == "vector":
+                    u_layer_id = str(render_layer["u_layer_id"])
+                    v_layer_id = str(render_layer["v_layer_id"])
+                    u_field, u_units = evaluator.evaluate_layer(u_layer_id, target)
+                    v_field, v_units = evaluator.evaluate_layer(v_layer_id, target)
+                    magnitude = np.sqrt(u_field**2 + v_field**2)
+                    u_summary = _summary(u_field)
+                    v_summary = _summary(v_field)
+                    magnitude_summary = _summary(magnitude)
+                    layer_summaries[u_layer_id] = u_summary
+                    layer_summaries[v_layer_id] = v_summary
+                    resolved_layers.append(
+                        {
+                            "u_layer_id": u_layer_id,
+                            "v_layer_id": v_layer_id,
+                            "style_id": render_layer.get("style_id"),
+                            "u_expr": str(layer_defs[u_layer_id].get("expr") or ""),
+                            "v_expr": str(layer_defs[v_layer_id].get("expr") or ""),
+                            "u_source_kind": str(
+                                layer_defs[u_layer_id].get("source", {}).get("kind") or "wrf_native"
+                            ),
+                            "v_source_kind": str(
+                                layer_defs[v_layer_id].get("source", {}).get("kind") or "wrf_native"
+                            ),
+                            "u_source": deepcopy(layer_defs[u_layer_id].get("source") or {}),
+                            "v_source": deepcopy(layer_defs[v_layer_id].get("source") or {}),
+                            "u_units": layer_defs[u_layer_id].get("units"),
+                            "v_units": layer_defs[v_layer_id].get("units"),
+                            "magnitude_units": (
+                                layer_defs[u_layer_id].get("units")
+                                if layer_defs[u_layer_id].get("units") == layer_defs[v_layer_id].get("units")
+                                else None
+                            ),
+                            "u_summary": u_summary,
+                            "v_summary": v_summary,
+                            "magnitude_summary": magnitude_summary,
+                            "draw": deepcopy(draw),
+                        }
+                    )
+                    if not dry_run and axis is not None:
+                        _render_vector(axis, u_field, v_field, draw=draw)
+                    continue
+
+                layer_id = str(render_layer["layer_id"])
                 field, units = evaluator.evaluate_layer(layer_id, target)
                 layer_summaries[layer_id] = _summary(field)
                 resolved_layers.append(
@@ -1053,6 +1151,9 @@ def run_figure_request(
                         "layer_id": layer_id,
                         "style_id": render_layer.get("style_id"),
                         "expr": str(layer_defs[layer_id].get("expr") or ""),
+                        "source_kind": str(
+                            layer_defs[layer_id].get("source", {}).get("kind") or "wrf_native"
+                        ),
                         "source": deepcopy(layer_defs[layer_id].get("source") or {}),
                         "units": layer_defs[layer_id].get("units"),
                         "draw": deepcopy(draw),

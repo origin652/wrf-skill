@@ -108,6 +108,22 @@ def default_layer_defs() -> dict[str, dict[str, Any]]:
                 "description": "10m wind speed magnitude from built-in diagnostics",
             },
         },
+        "u10": {
+            "source": {"kind": "wrf_native_2d"},
+            "expr": "U10",
+            "units": "m s-1",
+            "metadata": {
+                "description": "10m zonal wind component",
+            },
+        },
+        "v10": {
+            "source": {"kind": "wrf_native_2d"},
+            "expr": "V10",
+            "units": "m s-1",
+            "metadata": {
+                "description": "10m meridional wind component",
+            },
+        },
         "qvapor_lvl0_gkg": {
             "source": {
                 "kind": "wrf_native_3d",
@@ -169,6 +185,18 @@ def default_style_defs() -> dict[str, dict[str, Any]]:
                     {"value": 0, "color": "#4c78a8", "label": "water"},
                     {"value": 1, "color": "#e0c36e", "label": "land"},
                 ],
+            },
+        },
+        "wind_quiver": {
+            "kind": "vector",
+            "alpha": 0.9,
+            "zorder": 30,
+            "style": {
+                "mode": "quiver",
+                "stride": 4,
+                "scale": 80,
+                "color": "black",
+                "pivot": "mid",
             },
         },
     }
@@ -305,6 +333,8 @@ def _normalize_render_layer(
 ) -> dict[str, Any]:
     normalized: dict[str, Any] = {
         "layer_id": None,
+        "u_layer_id": None,
+        "v_layer_id": None,
         "style_id": None,
         "draw": _normalize_draw({}),
     }
@@ -318,9 +348,11 @@ def _normalize_render_layer(
         base_style = style_defs[style_id]
 
     for key, value in raw_layer.items():
-        if key not in {"layer_id", "style_id", "draw"}:
+        if key not in {"layer_id", "u_layer_id", "v_layer_id", "style_id", "draw"}:
             normalized[key] = deepcopy(value)
     normalized["layer_id"] = raw_layer.get("layer_id")
+    normalized["u_layer_id"] = raw_layer.get("u_layer_id")
+    normalized["v_layer_id"] = raw_layer.get("v_layer_id")
     normalized["style_id"] = style_id
     normalized["draw"] = _normalize_draw(raw_layer.get("draw"), base=base_style)
     return normalized
@@ -619,7 +651,7 @@ def _validate_draw(draw: Any, prefix: str, errors: list[str]) -> None:
         return
 
     kind = draw.get("kind")
-    allowed_kinds = {"raster", "contour", "categorical_fill"}
+    allowed_kinds = {"raster", "contour", "categorical_fill", "vector"}
     if not isinstance(kind, str) or kind not in allowed_kinds:
         errors.append(f"{prefix}.kind must be one of {', '.join(sorted(allowed_kinds))}")
 
@@ -662,6 +694,38 @@ def _validate_draw(draw: Any, prefix: str, errors: list[str]) -> None:
                 label = category.get("label")
                 if label is not None and (not isinstance(label, str) or not label.strip()):
                     errors.append(f"{item_prefix}.label must be a non-empty string or null")
+    elif kind == "vector":
+        mode = style.get("mode")
+        if mode not in {"quiver"}:
+            errors.append(f"{prefix}.style.mode must currently be quiver for vector")
+        stride = style.get("stride")
+        if stride is not None and (not isinstance(stride, int) or stride < 1):
+            errors.append(f"{prefix}.style.stride must be a positive integer when provided")
+        scale = style.get("scale")
+        if scale is not None and not isinstance(scale, (int, float)):
+            errors.append(f"{prefix}.style.scale must be a number when provided")
+        color = style.get("color")
+        if color is not None and (not isinstance(color, str) or not color.strip()):
+            errors.append(f"{prefix}.style.color must be a non-empty string when provided")
+        pivot = style.get("pivot")
+        if pivot is not None and pivot not in {"tail", "mid", "middle", "tip"}:
+            errors.append(f"{prefix}.style.pivot must be one of tail, mid, middle, tip when provided")
+
+
+def _render_layer_target_ids(render_layer: dict[str, Any]) -> list[str]:
+    draw = render_layer.get("draw")
+    kind = str(draw.get("kind") or "") if isinstance(draw, dict) else ""
+    if kind == "vector":
+        target_ids: list[str] = []
+        for key in ("u_layer_id", "v_layer_id"):
+            value = render_layer.get(key)
+            if isinstance(value, str) and value.strip():
+                target_ids.append(value)
+        return target_ids
+    value = render_layer.get("layer_id")
+    if isinstance(value, str) and value.strip():
+        return [value]
+    return []
 
 
 def validate_post_spec(spec: dict[str, Any]) -> list[str]:
@@ -725,18 +789,35 @@ def validate_post_spec(spec: dict[str, Any]) -> list[str]:
             if not isinstance(layer, dict):
                 errors.append(f"{layer_prefix} must be an object")
                 continue
-            layer_id = layer.get("layer_id")
-            if not isinstance(layer_id, str) or not layer_id.strip():
-                errors.append(f"{layer_prefix}.layer_id must be a non-empty string")
-            elif layer_id not in layer_defs:
-                errors.append(f"{layer_prefix}.layer_id references unknown layer_defs key: {layer_id}")
             style_id = layer.get("style_id")
             if style_id is not None:
                 if not isinstance(style_id, str) or not style_id.strip():
                     errors.append(f"{layer_prefix}.style_id must be a non-empty string or null")
                 elif style_id not in style_defs:
                     errors.append(f"{layer_prefix}.style_id references unknown style_defs key: {style_id}")
-            _validate_draw(layer.get("draw"), f"{layer_prefix}.draw", errors)
+            draw = layer.get("draw")
+            _validate_draw(draw, f"{layer_prefix}.draw", errors)
+            draw_kind = str(draw.get("kind") or "") if isinstance(draw, dict) else ""
+            if draw_kind == "vector":
+                for component_key in ("u_layer_id", "v_layer_id"):
+                    component_id = layer.get(component_key)
+                    if not isinstance(component_id, str) or not component_id.strip():
+                        errors.append(f"{layer_prefix}.{component_key} must be a non-empty string for vector layers")
+                    elif component_id not in layer_defs:
+                        errors.append(
+                            f"{layer_prefix}.{component_key} references unknown layer_defs key: {component_id}"
+                        )
+                if layer.get("layer_id") is not None:
+                    errors.append(f"{layer_prefix}.layer_id is not used when draw.kind=vector")
+            else:
+                layer_id = layer.get("layer_id")
+                if not isinstance(layer_id, str) or not layer_id.strip():
+                    errors.append(f"{layer_prefix}.layer_id must be a non-empty string")
+                elif layer_id not in layer_defs:
+                    errors.append(f"{layer_prefix}.layer_id references unknown layer_defs key: {layer_id}")
+                for component_key in ("u_layer_id", "v_layer_id"):
+                    if layer.get(component_key) is not None:
+                        errors.append(f"{layer_prefix}.{component_key} is only valid when draw.kind=vector")
 
     return errors
 
@@ -820,29 +901,64 @@ def interpret_post_spec(
     known_layers = set(layer_defs)
     interpreted_figures: list[dict[str, Any]] = []
     for figure in figures:
-        root_layer_ids = [str(layer["layer_id"]) for layer in figure.get("layers", [])]
+        root_layer_ids: list[str] = []
+        for render_layer in figure.get("layers", []):
+            for layer_id in _render_layer_target_ids(render_layer):
+                if layer_id not in root_layer_ids:
+                    root_layer_ids.append(layer_id)
         parsed_defs, dependency_order = runtime["resolve_layer_dependencies"](layer_defs, root_layer_ids)
         usage_memo: dict[str, bool] = {}
 
         resolved_layers: list[dict[str, Any]] = []
         for render_layer in figure.get("layers", []):
-            layer_id = str(render_layer["layer_id"])
-            parsed = parsed_defs[layer_id]
-            resolved_layers.append(
-                {
-                    "layer_id": layer_id,
-                    "style_id": render_layer.get("style_id"),
-                    "expr": str(layer_defs[layer_id].get("expr") or ""),
-                    "units": layer_defs[layer_id].get("units"),
-                    "source_kind": str(layer_defs[layer_id].get("source", {}).get("kind") or "wrf_native"),
-                    "source": deepcopy(layer_defs[layer_id].get("source") or {}),
-                    "depends_on": sorted(_collect_interpret_refs(parsed, known_layers, runtime)),
-                    "uses_current": bool(
-                        runtime["layer_uses_current"](layer_id, parsed_defs, memo=usage_memo)
-                    ),
-                    "draw": deepcopy(render_layer.get("draw") or {}),
-                }
-            )
+            draw = deepcopy(render_layer.get("draw") or {})
+            if str(draw.get("kind") or "") == "vector":
+                u_layer_id = str(render_layer["u_layer_id"])
+                v_layer_id = str(render_layer["v_layer_id"])
+                u_parsed = parsed_defs[u_layer_id]
+                v_parsed = parsed_defs[v_layer_id]
+                resolved_layers.append(
+                    {
+                        "u_layer_id": u_layer_id,
+                        "v_layer_id": v_layer_id,
+                        "style_id": render_layer.get("style_id"),
+                        "u_expr": str(layer_defs[u_layer_id].get("expr") or ""),
+                        "v_expr": str(layer_defs[v_layer_id].get("expr") or ""),
+                        "u_units": layer_defs[u_layer_id].get("units"),
+                        "v_units": layer_defs[v_layer_id].get("units"),
+                        "u_source_kind": str(layer_defs[u_layer_id].get("source", {}).get("kind") or "wrf_native"),
+                        "v_source_kind": str(layer_defs[v_layer_id].get("source", {}).get("kind") or "wrf_native"),
+                        "u_source": deepcopy(layer_defs[u_layer_id].get("source") or {}),
+                        "v_source": deepcopy(layer_defs[v_layer_id].get("source") or {}),
+                        "depends_on": sorted(
+                            _collect_interpret_refs(u_parsed, known_layers, runtime)
+                            | _collect_interpret_refs(v_parsed, known_layers, runtime)
+                        ),
+                        "uses_current": bool(
+                            runtime["layer_uses_current"](u_layer_id, parsed_defs, memo=usage_memo)
+                            or runtime["layer_uses_current"](v_layer_id, parsed_defs, memo=usage_memo)
+                        ),
+                        "draw": draw,
+                    }
+                )
+            else:
+                layer_id = str(render_layer["layer_id"])
+                parsed = parsed_defs[layer_id]
+                resolved_layers.append(
+                    {
+                        "layer_id": layer_id,
+                        "style_id": render_layer.get("style_id"),
+                        "expr": str(layer_defs[layer_id].get("expr") or ""),
+                        "units": layer_defs[layer_id].get("units"),
+                        "source_kind": str(layer_defs[layer_id].get("source", {}).get("kind") or "wrf_native"),
+                        "source": deepcopy(layer_defs[layer_id].get("source") or {}),
+                        "depends_on": sorted(_collect_interpret_refs(parsed, known_layers, runtime)),
+                        "uses_current": bool(
+                            runtime["layer_uses_current"](layer_id, parsed_defs, memo=usage_memo)
+                        ),
+                        "draw": draw,
+                    }
+                )
 
         figure_uses_current = any(item["uses_current"] for item in resolved_layers)
         interpreted_figures.append(

@@ -5,7 +5,12 @@ import sys
 import unittest
 from pathlib import Path
 
-from scripts.post_spec import default_post_spec, normalize_post_spec, validate_post_spec
+from scripts.post_spec import (
+    default_post_spec,
+    interpret_post_spec,
+    normalize_post_spec,
+    validate_post_spec,
+)
 
 TMP_ROOT = Path(__file__).resolve().parents[1] / "runs"
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "post_spec.py"
@@ -26,8 +31,11 @@ class PostSpecTests(unittest.TestCase):
         self.assertEqual(payload["project_name"], "demo")
         self.assertEqual(payload["defaults"]["render"]["format"], "png")
         self.assertIn("temperature_raster", payload["style_defs"])
+        self.assertIn("wind_quiver", payload["style_defs"])
         self.assertIn("t2_c", payload["layer_defs"])
         self.assertIn("terrain", payload["layer_defs"])
+        self.assertIn("u10", payload["layer_defs"])
+        self.assertIn("v10", payload["layer_defs"])
         self.assertEqual(payload["figures"][0]["figure_id"], "surface_temperature")
         self.assertEqual(payload["figures"][0]["layers"][0]["layer_id"], "t2_c")
         self.assertEqual(payload["figures"][0]["layers"][0]["style_id"], "temperature_raster")
@@ -157,6 +165,38 @@ class PostSpecTests(unittest.TestCase):
 
         self.assertTrue(any("unknown style_defs key" in error for error in errors))
 
+    def test_validate_rejects_incomplete_vector_render_layer(self) -> None:
+        payload = normalize_post_spec(
+            {
+                "project_name": "case-vector-missing-v",
+                "style_defs": {
+                    "wind_quiver": {
+                        "kind": "vector",
+                        "style": {"mode": "quiver", "stride": 2},
+                    }
+                },
+                "layer_defs": {
+                    "u10": {"expr": "U10", "units": "m s-1"},
+                    "v10": {"expr": "V10", "units": "m s-1"},
+                },
+                "figures": [
+                    {
+                        "figure_id": "fig-1",
+                        "layers": [
+                            {
+                                "u_layer_id": "u10",
+                                "style_id": "wind_quiver",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        errors = validate_post_spec(payload)
+
+        self.assertTrue(any(".v_layer_id must be a non-empty string" in error for error in errors))
+
     def test_validate_rejects_wrf_native_3d_without_level_selector(self) -> None:
         payload = normalize_post_spec(
             {
@@ -266,6 +306,48 @@ class PostSpecTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["figures"][0]["render"]["dpi"], 240)
         self.assertEqual(payload["figures"][0]["layers"][0]["layer_id"], "wind10m")
+
+    def test_interpret_resolves_vector_render_layer(self) -> None:
+        payload = interpret_post_spec(
+            {
+                "project_name": "case-vector",
+                "style_defs": {
+                    "wind_quiver": {
+                        "kind": "vector",
+                        "alpha": 0.85,
+                        "style": {"mode": "quiver", "stride": 3, "scale": 50},
+                    }
+                },
+                "layer_defs": {
+                    "u10": {"expr": "U10", "units": "m s-1"},
+                    "v10": {"expr": "V10", "units": "m s-1"},
+                },
+                "figures": [
+                    {
+                        "figure_id": "surface-wind-vectors",
+                        "layers": [
+                            {
+                                "u_layer_id": "u10",
+                                "v_layer_id": "v10",
+                                "style_id": "wind_quiver",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(payload["project_name"], "case-vector")
+        figure = payload["figures"][0]
+        self.assertEqual(figure["figure_id"], "surface-wind-vectors")
+        self.assertEqual(figure["output_mode"], "per_frame")
+        self.assertEqual(figure["render_layer_order"], ["u10", "v10"])
+        resolved = figure["resolved_layers"][0]
+        self.assertEqual(resolved["u_layer_id"], "u10")
+        self.assertEqual(resolved["v_layer_id"], "v10")
+        self.assertEqual(resolved["draw"]["kind"], "vector")
+        self.assertEqual(resolved["draw"]["style"]["mode"], "quiver")
+        self.assertTrue(resolved["uses_current"])
 
     def test_cli_interpret_outputs_execution_plan(self) -> None:
         runs_dir = make_test_dir("_test_post_spec_interpret_cli")

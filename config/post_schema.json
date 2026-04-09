@@ -360,7 +360,8 @@
           "enum": [
             "raster",
             "contour",
-            "categorical_fill"
+            "categorical_fill",
+            "vector"
           ]
         },
         "alpha": {
@@ -491,21 +492,89 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "vector"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "style": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "quiver"
+                    ]
+                  },
+                  "stride": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "scale": {
+                    "type": "number"
+                  },
+                  "color": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "pivot": {
+                    "type": "string",
+                    "enum": [
+                      "tail",
+                      "mid",
+                      "middle",
+                      "tip"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
         }
       ]
     },
     "render_layer": {
       "type": "object",
-      "required": [
-        "layer_id"
-      ],
       "properties": {
         "layer_id": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "u_layer_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "v_layer_id": {
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1
         },
         "style_id": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1
         },
         "draw": {
@@ -523,6 +592,38 @@
           "required": [
             "style_id"
           ]
+        }
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "layer_id"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "u_layer_id"
+                ]
+              },
+              {
+                "required": [
+                  "v_layer_id"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "u_layer_id",
+            "v_layer_id"
+          ],
+          "not": {
+            "required": [
+              "layer_id"
+            ]
+          }
         }
       ]
     },
