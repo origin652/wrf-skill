@@ -47,12 +47,23 @@ SUPPORTED_SOURCE_KINDS = {
     "wrf_native_3d_full",
     "wrf_diag",
 }
-SUPPORTED_VIEW_AXES = {
+SUPPORTED_NATIVE_VIEW_AXES = {
     "time",
     "bottom_top",
     "south_north",
     "west_east",
 }
+SUPPORTED_DERIVED_VIEW_AXES = {
+    "height_m",
+}
+SUPPORTED_PATH_VIEW_AXES = {
+    "distance_km",
+}
+SUPPORTED_VIEW_AXES = (
+    SUPPORTED_NATIVE_VIEW_AXES
+    | SUPPORTED_DERIVED_VIEW_AXES
+    | SUPPORTED_PATH_VIEW_AXES
+)
 FUNCTION_NAMES = {
     "sqrt",
     "abs",
@@ -76,6 +87,27 @@ class FormulaParseError(ValueError):
 
 class LayerResolutionError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class FieldCube:
+    values: np.ndarray
+    dims: tuple[str, ...]
+    coords: dict[str, np.ndarray] | None
+    units: str | None
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ResolvedViewField:
+    values: np.ndarray
+    dims: tuple[str, str]
+    x_axis: dict[str, Any]
+    y_axis: dict[str, Any]
+    x_coords: np.ndarray | None
+    y_coords: np.ndarray | None
+    units: str | None
+    metadata: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -116,8 +148,8 @@ def posix_path(path: Path | str) -> str:
 
 def default_view_spec() -> dict[str, Any]:
     return {
-        "x_axis": {"name": "west_east"},
-        "y_axis": {"name": "south_north"},
+        "x_axis": {"kind": "native_dim", "name": "west_east"},
+        "y_axis": {"kind": "native_dim", "name": "south_north"},
         "selectors": {},
     }
 
@@ -131,25 +163,46 @@ def _view_axis_name(axis: Any) -> str:
     return str(axis).strip()
 
 
+def _view_axis_kind(axis: Any) -> str:
+    if isinstance(axis, dict):
+        raw_kind = axis.get("kind")
+        if isinstance(raw_kind, str) and raw_kind.strip():
+            return raw_kind.strip()
+    name = _view_axis_name(axis)
+    if name in SUPPORTED_NATIVE_VIEW_AXES:
+        return "native_dim"
+    if name in SUPPORTED_DERIVED_VIEW_AXES:
+        return "derived_coord"
+    if name in SUPPORTED_PATH_VIEW_AXES:
+        return "path_coord"
+    return ""
+
+
 def _normalize_view_axis(raw_axis: Any, *, fallback_name: str) -> dict[str, Any]:
     normalized: dict[str, Any] = {
+        "kind": _view_axis_kind({"name": fallback_name}),
         "name": fallback_name,
         "label": None,
         "units": None,
     }
     if isinstance(raw_axis, dict):
         for key, value in raw_axis.items():
-            if key not in {"name", "label", "units"}:
+            if key not in {"kind", "name", "label", "units"}:
                 normalized[key] = deepcopy(value)
+        if raw_axis.get("kind") is not None:
+            normalized["kind"] = raw_axis.get("kind")
         if raw_axis.get("name") is not None:
             normalized["name"] = raw_axis.get("name")
         if raw_axis.get("label") is not None:
             normalized["label"] = raw_axis.get("label")
         if raw_axis.get("units") is not None:
             normalized["units"] = raw_axis.get("units")
+        if not normalized.get("kind"):
+            normalized["kind"] = _view_axis_kind(normalized)
         return normalized
     if raw_axis is not None:
         normalized["name"] = raw_axis
+        normalized["kind"] = _view_axis_kind(normalized)
     return normalized
 
 
@@ -642,43 +695,298 @@ def _ensure_2d_field(value: Any, *, label: str) -> np.ndarray:
     return field
 
 
-def _stack_layer_over_time(
-    evaluator: "FigureEvaluator",
-    layer_id: str,
-    frames: list[dict[str, Any]],
-) -> tuple[np.ndarray, tuple[str, ...], str | None]:
-    values: list[np.ndarray] = []
-    units: str | None = None
-    for frame in frames:
-        field, field_units = evaluator.evaluate_layer(layer_id, frame)
-        array = np.asarray(np.ma.filled(field, np.nan), dtype=float)
-        values.append(array)
-        if units is None:
-            units = field_units
+def _is_default_axis_coords(coords: np.ndarray | None, size: int) -> bool:
+    if coords is None:
+        return True
+    array = np.asarray(coords, dtype=float)
+    if array.ndim != 1 or array.shape[0] != size:
+        return False
+    return np.allclose(array, np.arange(size, dtype=float))
 
-    if not values:
-        raise ValueError("Cannot build section field from an empty frame list")
 
-    first = values[0]
-    ndim = int(first.ndim)
-    if ndim not in {2, 3}:
+def _coordinate_mesh(
+    field: np.ndarray,
+    *,
+    x_coords: np.ndarray | None,
+    y_coords: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if _is_default_axis_coords(x_coords, int(field.shape[1])) and _is_default_axis_coords(
+        y_coords,
+        int(field.shape[0]),
+    ):
+        return None
+
+    x_array = None if x_coords is None else np.asarray(x_coords, dtype=float)
+    y_array = None if y_coords is None else np.asarray(y_coords, dtype=float)
+
+    if x_array is None:
+        x_array = np.arange(field.shape[1], dtype=float)
+    if y_array is None:
+        y_array = np.arange(field.shape[0], dtype=float)
+
+    if x_array.ndim == 1 and y_array.ndim == 1:
+        return np.meshgrid(x_array, y_array)
+    if x_array.ndim == 1 and y_array.ndim == 2 and y_array.shape == field.shape:
+        return np.broadcast_to(x_array.reshape(1, -1), field.shape), y_array
+    if x_array.ndim == 2 and x_array.shape == field.shape and y_array.ndim == 1:
+        return x_array, np.broadcast_to(y_array.reshape(-1, 1), field.shape)
+    if (
+        x_array.ndim == 2
+        and y_array.ndim == 2
+        and x_array.shape == field.shape
+        and y_array.shape == field.shape
+    ):
+        return x_array, y_array
+    raise ValueError(
+        f"Unsupported coordinate shapes for field shape {field.shape}: "
+        f"x={None if x_coords is None else np.asarray(x_coords).shape}, "
+        f"y={None if y_coords is None else np.asarray(y_coords).shape}"
+    )
+
+
+def _center_mesh_to_edge_mesh(mesh: np.ndarray) -> np.ndarray:
+    centers = np.asarray(mesh, dtype=float)
+    if centers.ndim != 2:
+        raise ValueError(f"Expected a 2D coordinate mesh, received ndim={centers.ndim}")
+
+    rows, cols = centers.shape
+    padded = np.empty((rows + 2, cols + 2), dtype=float)
+    padded[1:-1, 1:-1] = centers
+
+    if cols > 1:
+        padded[1:-1, 0] = 2.0 * centers[:, 0] - centers[:, 1]
+        padded[1:-1, -1] = 2.0 * centers[:, -1] - centers[:, -2]
+    else:
+        padded[1:-1, 0] = centers[:, 0] - 0.5
+        padded[1:-1, -1] = centers[:, 0] + 0.5
+
+    if rows > 1:
+        padded[0, 1:-1] = 2.0 * centers[0, :] - centers[1, :]
+        padded[-1, 1:-1] = 2.0 * centers[-1, :] - centers[-2, :]
+    else:
+        padded[0, 1:-1] = centers[0, :] - 0.5
+        padded[-1, 1:-1] = centers[0, :] + 0.5
+
+    padded[0, 0] = padded[0, 1] + padded[1, 0] - padded[1, 1]
+    padded[0, -1] = padded[0, -2] + padded[1, -1] - padded[1, -2]
+    padded[-1, 0] = padded[-2, 0] + padded[-1, 1] - padded[-2, 1]
+    padded[-1, -1] = padded[-2, -1] + padded[-1, -2] - padded[-2, -2]
+
+    return 0.25 * (
+        padded[:-1, :-1]
+        + padded[1:, :-1]
+        + padded[:-1, 1:]
+        + padded[1:, 1:]
+    )
+
+
+def _pcolormesh_coordinate_mesh(
+    field: np.ndarray,
+    *,
+    x_coords: np.ndarray | None,
+    y_coords: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    mesh = _coordinate_mesh(field, x_coords=x_coords, y_coords=y_coords)
+    if mesh is None:
+        return None
+
+    x_mesh, y_mesh = mesh
+    # Curvilinear section coordinates need explicit cell edges to avoid
+    # Matplotlib inferring broken quads from center coordinates.
+    return _center_mesh_to_edge_mesh(x_mesh), _center_mesh_to_edge_mesh(y_mesh)
+
+
+def _dims_for_field(field: np.ndarray, *, label: str) -> tuple[str, ...]:
+    if field.ndim == 2:
+        return ("south_north", "west_east")
+    if field.ndim == 3:
+        return ("bottom_top", "south_north", "west_east")
+    raise ValueError(
+        f"{label} resolved to unsupported ndim={field.ndim}; expected 2D or 3D fields"
+    )
+
+
+def _default_coords_for_dims(dims: tuple[str, ...], shape: tuple[int, ...]) -> dict[str, np.ndarray]:
+    coords: dict[str, np.ndarray] = {}
+    for dim, size in zip(dims, shape):
+        coords[dim] = np.arange(int(size), dtype=float)
+    return coords
+
+
+def _build_field_cube(
+    values: Any,
+    *,
+    dims: tuple[str, ...],
+    units: str | None,
+    metadata: dict[str, Any] | None = None,
+    coords: dict[str, Any] | None = None,
+    label: str,
+) -> FieldCube:
+    array = np.asarray(np.ma.filled(values, np.nan), dtype=float)
+    if array.ndim != len(dims):
         raise ValueError(
-            f"layer_defs.{layer_id} resolved to unsupported ndim={ndim}; expected 2D or 3D for section views"
+            f"{label} expected ndim={len(dims)} for dims={dims}, received ndim={array.ndim}"
         )
-    for index, value in enumerate(values[1:], start=1):
-        if value.ndim != ndim:
-            raise ValueError(
-                f"layer_defs.{layer_id} frame {index} changed ndim from {ndim} to {value.ndim}"
-            )
-        if value.shape != first.shape:
-            raise ValueError(
-                f"layer_defs.{layer_id} frame {index} changed shape from {first.shape} to {value.shape}"
-            )
 
-    stacked = np.stack(values, axis=0)
-    if ndim == 2:
-        return stacked, ("time", "south_north", "west_east"), units
-    return stacked, ("time", "bottom_top", "south_north", "west_east"), units
+    normalized_coords = _default_coords_for_dims(dims, array.shape)
+    if isinstance(coords, dict):
+        for dim in dims:
+            if dim in coords and coords[dim] is not None:
+                normalized_coords[dim] = np.asarray(coords[dim], dtype=float)
+
+    return FieldCube(
+        values=array,
+        dims=dims,
+        coords=normalized_coords,
+        units=units,
+        metadata=deepcopy(metadata or {}),
+    )
+
+
+def _resolve_axis_coords(value: Any, *, size: int) -> np.ndarray:
+    if value is None:
+        return np.arange(size, dtype=float)
+    array = np.asarray(value, dtype=float)
+    if array.ndim == 1 and array.shape[0] == size:
+        return array
+    return np.arange(size, dtype=float)
+
+
+def _reduce_cube_for_view(
+    cube: FieldCube,
+    *,
+    keep_dims: set[str],
+    selectors: dict[str, Any],
+    current_time_index: int | None,
+) -> tuple[FieldCube, dict[str, int]]:
+    values = np.asarray(cube.values, dtype=float)
+    active_dims = list(cube.dims)
+    active_coords = dict(cube.coords or {})
+    selected_indices: dict[str, int] = {}
+
+    for dim in list(active_dims):
+        if dim in keep_dims:
+            continue
+        axis = active_dims.index(dim)
+        selector = selectors.get(dim)
+        index = _selector_index(
+            dim,
+            selector,
+            int(values.shape[axis]),
+            current_time_index=current_time_index,
+        )
+        values = np.take(values, indices=index, axis=axis)
+        active_dims.pop(axis)
+        active_coords.pop(dim, None)
+        selected_indices[dim] = index
+
+    coords: dict[str, np.ndarray] = {}
+    for axis, dim in enumerate(active_dims):
+        coord_value = active_coords.get(dim)
+        if coord_value is None:
+            continue
+        coord_array = np.asarray(coord_value, dtype=float)
+        if coord_array.ndim == 1 and coord_array.shape[0] == int(values.shape[axis]):
+            coords[dim] = coord_array
+
+    reduced_cube = _build_field_cube(
+        values,
+        dims=tuple(active_dims),
+        units=cube.units,
+        metadata=deepcopy(cube.metadata),
+        coords=coords,
+        label="view_reduction",
+    )
+    return reduced_cube, selected_indices
+
+
+def _great_circle_km(
+    lat1: Any,
+    lon1: Any,
+    lat2: Any,
+    lon2: Any,
+) -> np.ndarray:
+    lat1_rad = np.radians(np.asarray(lat1, dtype=float))
+    lon1_rad = np.radians(np.asarray(lon1, dtype=float))
+    lat2_rad = np.radians(np.asarray(lat2, dtype=float))
+    lon2_rad = np.radians(np.asarray(lon2, dtype=float))
+
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2.0) ** 2
+    return 6371.0 * (2.0 * np.arctan2(np.sqrt(a), np.sqrt(np.maximum(1.0 - a, 0.0))))
+
+
+def _build_polyline_samples(path_config: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    points = path_config.get("points") or []
+    samples = int(path_config.get("samples") or 0)
+    if samples < 2 or len(points) < 2:
+        raise ValueError("sampling.path requires at least two points and samples >= 2")
+
+    latitudes = np.asarray([float(point["lat"]) for point in points], dtype=float)
+    longitudes = np.asarray([float(point["lon"]) for point in points], dtype=float)
+    segment_lengths = _great_circle_km(
+        latitudes[:-1],
+        longitudes[:-1],
+        latitudes[1:],
+        longitudes[1:],
+    )
+    cumulative = np.concatenate([[0.0], np.cumsum(segment_lengths)])
+    total = float(cumulative[-1])
+    if total <= 0.0:
+        raise ValueError("sampling.path points must span a non-zero distance")
+
+    distances = np.linspace(0.0, total, samples)
+    sample_lats = np.empty(samples, dtype=float)
+    sample_lons = np.empty(samples, dtype=float)
+    segment_index = 0
+    for index, distance in enumerate(distances):
+        while segment_index < len(segment_lengths) - 1 and distance > cumulative[segment_index + 1]:
+            segment_index += 1
+        segment_start = cumulative[segment_index]
+        segment_length = float(segment_lengths[segment_index])
+        fraction = 0.0 if segment_length <= 0.0 else (distance - segment_start) / segment_length
+        sample_lats[index] = latitudes[segment_index] + fraction * (
+            latitudes[segment_index + 1] - latitudes[segment_index]
+        )
+        sample_lons[index] = longitudes[segment_index] + fraction * (
+            longitudes[segment_index + 1] - longitudes[segment_index]
+        )
+
+    return distances, sample_lats, sample_lons
+
+
+def _nearest_horizontal_indices(
+    lat_grid: np.ndarray,
+    lon_grid: np.ndarray,
+    sample_lats: np.ndarray,
+    sample_lons: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    if lat_grid.shape != lon_grid.shape:
+        raise ValueError("XLAT and XLONG grids must share the same shape")
+
+    rows = np.empty(sample_lats.shape[0], dtype=int)
+    cols = np.empty(sample_lats.shape[0], dtype=int)
+    flat_lat = np.asarray(lat_grid, dtype=float).reshape(-1)
+    flat_lon = np.asarray(lon_grid, dtype=float).reshape(-1)
+
+    for index, (lat_value, lon_value) in enumerate(zip(sample_lats, sample_lons)):
+        distances = _great_circle_km(flat_lat, flat_lon, lat_value, lon_value)
+        flat_index = int(np.nanargmin(distances))
+        row, col = np.unravel_index(flat_index, lat_grid.shape)
+        rows[index] = int(row)
+        cols[index] = int(col)
+
+    return rows, cols
+
+
+def _sample_along_path(field: np.ndarray, row_indices: np.ndarray, col_indices: np.ndarray) -> np.ndarray:
+    values = np.asarray(field, dtype=float)
+    if values.ndim == 2:
+        return values[row_indices, col_indices]
+    if values.ndim == 3:
+        return values[:, row_indices, col_indices]
+    raise ValueError(f"path sampling requires 2D or 3D fields, received ndim={values.ndim}")
 
 
 def _selector_mode(selector: Any) -> str | None:
@@ -733,43 +1041,34 @@ def _selector_index(
     )
 
 
-def _extract_view_field(
-    stacked: np.ndarray,
-    dims: tuple[str, ...],
+def _resolve_native_view_field(
+    cube: FieldCube,
     view_spec: dict[str, Any],
     *,
     current_time_index: int | None,
-) -> np.ndarray:
+) -> ResolvedViewField:
     x_axis = _view_axis_name(view_spec.get("x_axis"))
     y_axis = _view_axis_name(view_spec.get("y_axis"))
     selectors = view_spec.get("selectors") if isinstance(view_spec.get("selectors"), dict) else {}
 
-    if x_axis not in SUPPORTED_VIEW_AXES or y_axis not in SUPPORTED_VIEW_AXES:
+    if x_axis not in SUPPORTED_NATIVE_VIEW_AXES or y_axis not in SUPPORTED_NATIVE_VIEW_AXES:
         raise ValueError(
-            f"Unsupported view axes x={x_axis!r}, y={y_axis!r}; supported axes: {', '.join(sorted(SUPPORTED_VIEW_AXES))}"
+            f"Unsupported native view axes x={x_axis!r}, y={y_axis!r}; supported axes: {', '.join(sorted(SUPPORTED_NATIVE_VIEW_AXES))}"
         )
     if x_axis == y_axis:
         raise ValueError("x_axis and y_axis must be different")
 
-    values = np.asarray(stacked, dtype=float)
-    active_dims = list(dims)
-    for dim in list(active_dims):
-        if dim in {x_axis, y_axis}:
-            continue
-        axis = active_dims.index(dim)
-        selector = selectors.get(dim) if isinstance(selectors, dict) else None
-        index = _selector_index(
-            dim,
-            selector,
-            int(values.shape[axis]),
-            current_time_index=current_time_index,
-        )
-        values = np.take(values, indices=index, axis=axis)
-        active_dims.pop(axis)
+    reduced_cube, _ = _reduce_cube_for_view(
+        cube,
+        keep_dims={x_axis, y_axis},
+        selectors=selectors,
+        current_time_index=current_time_index,
+    )
 
+    active_dims = list(reduced_cube.dims)
     if x_axis not in active_dims or y_axis not in active_dims:
         raise ValueError(
-            f"View axes x={x_axis}, y={y_axis} are not available for current layer dimensions {tuple(dims)}"
+            f"View axes x={x_axis}, y={y_axis} are not available for current layer dimensions {cube.dims}"
         )
     if len(active_dims) != 2:
         raise ValueError(
@@ -778,8 +1077,142 @@ def _extract_view_field(
 
     y_index = active_dims.index(y_axis)
     x_index = active_dims.index(x_axis)
-    values = np.moveaxis(values, [y_index, x_index], [0, 1])
-    return _ensure_2d_field(values, label="view_extraction")
+    values = np.moveaxis(reduced_cube.values, [y_index, x_index], [0, 1])
+    resolved_values = _ensure_2d_field(values, label="view_extraction")
+    reduced_coords = reduced_cube.coords or {}
+    y_coords = _resolve_axis_coords(reduced_coords.get(y_axis), size=int(resolved_values.shape[0]))
+    x_coords = _resolve_axis_coords(reduced_coords.get(x_axis), size=int(resolved_values.shape[1]))
+    metadata = deepcopy(reduced_cube.metadata)
+    metadata["source_dims"] = list(cube.dims)
+
+    return ResolvedViewField(
+        values=resolved_values,
+        dims=(y_axis, x_axis),
+        x_axis=_normalize_view_axis(view_spec.get("x_axis"), fallback_name=x_axis or "west_east"),
+        y_axis=_normalize_view_axis(view_spec.get("y_axis"), fallback_name=y_axis or "south_north"),
+        x_coords=x_coords,
+        y_coords=y_coords,
+        units=cube.units,
+        metadata=metadata,
+    )
+
+
+def _resolve_path_view_field(
+    cube: FieldCube,
+    view_spec: dict[str, Any],
+    *,
+    current_time_index: int | None,
+    evaluator: "FigureEvaluator" | None,
+    frames: list[dict[str, Any]] | None,
+) -> ResolvedViewField:
+    if evaluator is None or frames is None:
+        raise ValueError("Path-coordinate views require evaluator and frame context")
+
+    x_axis_name = _view_axis_name(view_spec.get("x_axis"))
+    y_axis_name = _view_axis_name(view_spec.get("y_axis"))
+    x_axis_kind = _view_axis_kind(view_spec.get("x_axis"))
+    y_axis_kind = _view_axis_kind(view_spec.get("y_axis"))
+    selectors = view_spec.get("selectors") if isinstance(view_spec.get("selectors"), dict) else {}
+
+    if x_axis_kind != "path_coord" or x_axis_name != "distance_km":
+        raise ValueError("First-pass path sections currently require x_axis.kind=path_coord with name=distance_km")
+    if y_axis_name not in {"bottom_top", "height_m"}:
+        raise ValueError("First-pass path sections currently support y_axis bottom_top or height_m")
+    if _view_axis_name(view_spec.get("x_axis")) == "time" or _view_axis_name(view_spec.get("y_axis")) == "time":
+        raise ValueError("Path-coordinate sections do not currently support time as a plotted axis")
+
+    reduced_cube, selected_indices = _reduce_cube_for_view(
+        cube,
+        keep_dims={"bottom_top", "south_north", "west_east"},
+        selectors=selectors,
+        current_time_index=current_time_index,
+    )
+    if tuple(reduced_cube.dims) != ("bottom_top", "south_north", "west_east"):
+        raise ValueError(
+            "distance_km sections currently require a 3D field with remaining dims "
+            "('bottom_top', 'south_north', 'west_east') after selector reduction"
+        )
+
+    time_index = selected_indices.get("time")
+    if time_index is None:
+        raise ValueError("distance_km sections require time to be resolved by selectors or current frame")
+    if time_index < 0 or time_index >= len(frames):
+        raise ValueError(f"Resolved time index {time_index} is out of range for available frames={len(frames)}")
+    frame = frames[time_index]
+
+    sampling = view_spec.get("sampling")
+    if not isinstance(sampling, dict):
+        raise ValueError("distance_km sections require view.sampling.path")
+    path_config = sampling.get("path")
+    if not isinstance(path_config, dict):
+        raise ValueError("distance_km sections require view.sampling.path")
+
+    distances, sample_lats, sample_lons = _build_polyline_samples(path_config)
+    lat_grid, lon_grid = evaluator.load_horizontal_coords(frame)
+    row_indices, col_indices = _nearest_horizontal_indices(
+        lat_grid,
+        lon_grid,
+        sample_lats,
+        sample_lons,
+    )
+    sampled_values = _sample_along_path(reduced_cube.values, row_indices, col_indices)
+    if sampled_values.ndim != 2:
+        raise ValueError("distance_km sections expected a 2D sampled field after path extraction")
+
+    y_coords: np.ndarray
+    if y_axis_kind == "derived_coord" or y_axis_name == "height_m":
+        mass_height = evaluator.load_mass_height(frame)
+        if mass_height.shape != tuple(reduced_cube.values.shape):
+            raise ValueError(
+                f"Mass-height field shape {mass_height.shape} does not match sampled cube shape {reduced_cube.values.shape}"
+            )
+        y_coords = _sample_along_path(mass_height, row_indices, col_indices)
+    else:
+        y_coords = np.arange(sampled_values.shape[0], dtype=float)
+
+    metadata = deepcopy(reduced_cube.metadata)
+    metadata["source_dims"] = list(cube.dims)
+    metadata["sampling"] = {
+        "path_kind": "polyline",
+        "sample_count": int(distances.shape[0]),
+        "selected_time_index": int(time_index),
+    }
+
+    return ResolvedViewField(
+        values=sampled_values,
+        dims=(y_axis_name, x_axis_name),
+        x_axis=_normalize_view_axis(view_spec.get("x_axis"), fallback_name="distance_km"),
+        y_axis=_normalize_view_axis(view_spec.get("y_axis"), fallback_name=y_axis_name),
+        x_coords=np.asarray(distances, dtype=float),
+        y_coords=np.asarray(y_coords, dtype=float),
+        units=reduced_cube.units,
+        metadata=metadata,
+    )
+
+
+def _resolve_view_field(
+    cube: FieldCube,
+    view_spec: dict[str, Any],
+    *,
+    current_time_index: int | None,
+    evaluator: "FigureEvaluator" | None = None,
+    frames: list[dict[str, Any]] | None = None,
+) -> ResolvedViewField:
+    x_axis_kind = _view_axis_kind(view_spec.get("x_axis"))
+    y_axis_kind = _view_axis_kind(view_spec.get("y_axis"))
+    if "path_coord" in {x_axis_kind, y_axis_kind}:
+        return _resolve_path_view_field(
+            cube,
+            view_spec,
+            current_time_index=current_time_index,
+            evaluator=evaluator,
+            frames=frames,
+        )
+    return _resolve_native_view_field(
+        cube,
+        view_spec,
+        current_time_index=current_time_index,
+    )
 
 
 def _render_raster(
@@ -789,40 +1222,118 @@ def _render_raster(
     *,
     draw: dict[str, Any],
     units: str | None,
+    x_coords: np.ndarray | None = None,
+    y_coords: np.ndarray | None = None,
 ) -> None:
     style = draw.get("style", {})
-    image = axis.imshow(
-        field,
-        origin="lower",
-        cmap=str(style.get("colormap") or "viridis"),
-        alpha=float(draw.get("alpha", 1.0)),
-        zorder=float(draw.get("zorder") or _default_zorder("raster")),
-        vmin=style.get("vmin"),
-        vmax=style.get("vmax"),
-    )
+    mesh = _pcolormesh_coordinate_mesh(field, x_coords=x_coords, y_coords=y_coords)
+    if mesh is None:
+        image = axis.imshow(
+            field,
+            origin="lower",
+            cmap=str(style.get("colormap") or "viridis"),
+            alpha=float(draw.get("alpha", 1.0)),
+            zorder=float(draw.get("zorder") or _default_zorder("raster")),
+            vmin=style.get("vmin"),
+            vmax=style.get("vmax"),
+        )
+    else:
+        x_mesh, y_mesh = mesh
+        image = axis.pcolormesh(
+            x_mesh,
+            y_mesh,
+            field,
+            shading="auto",
+            cmap=str(style.get("colormap") or "viridis"),
+            alpha=float(draw.get("alpha", 1.0)),
+            zorder=float(draw.get("zorder") or _default_zorder("raster")),
+            vmin=style.get("vmin"),
+            vmax=style.get("vmax"),
+        )
     if bool(style.get("show_colorbar", True)):
         colorbar = figure.colorbar(image, ax=axis, shrink=0.9)
         if units:
             colorbar.set_label(units)
 
 
-def _render_contour(axis: Any, field: np.ndarray, *, draw: dict[str, Any]) -> None:
+def _render_contour(
+    axis: Any,
+    field: np.ndarray,
+    *,
+    draw: dict[str, Any],
+    x_coords: np.ndarray | None = None,
+    y_coords: np.ndarray | None = None,
+) -> None:
     style = draw.get("style", {})
-    contour = axis.contour(
-        field,
-        levels=style.get("levels"),
-        colors=style.get("colors"),
-        linewidths=style.get("linewidths"),
-        linestyles=style.get("linestyles"),
-        alpha=float(draw.get("alpha", 1.0)),
-        zorder=float(draw.get("zorder") or _default_zorder("contour")),
-    )
+    mesh = _coordinate_mesh(field, x_coords=x_coords, y_coords=y_coords)
+    if mesh is None:
+        contour = axis.contour(
+            field,
+            levels=style.get("levels"),
+            colors=style.get("colors"),
+            linewidths=style.get("linewidths"),
+            linestyles=style.get("linestyles"),
+            alpha=float(draw.get("alpha", 1.0)),
+            zorder=float(draw.get("zorder") or _default_zorder("contour")),
+        )
+    else:
+        x_mesh, y_mesh = mesh
+        contour = axis.contour(
+            x_mesh,
+            y_mesh,
+            field,
+            levels=style.get("levels"),
+            colors=style.get("colors"),
+            linewidths=style.get("linewidths"),
+            linestyles=style.get("linestyles"),
+            alpha=float(draw.get("alpha", 1.0)),
+            zorder=float(draw.get("zorder") or _default_zorder("contour")),
+        )
     if bool(style.get("label_contours", False)):
         axis.clabel(contour, fmt=str(style.get("label_format") or "%1.0f"))
 
 
-def _render_categorical_fill(axis: Any, field: np.ndarray, *, draw: dict[str, Any]) -> None:
+def _render_categorical_fill(
+    axis: Any,
+    field: np.ndarray,
+    *,
+    draw: dict[str, Any],
+    x_coords: np.ndarray | None = None,
+    y_coords: np.ndarray | None = None,
+) -> None:
     style = draw.get("style", {})
+    mesh = _pcolormesh_coordinate_mesh(field, x_coords=x_coords, y_coords=y_coords)
+    if mesh is not None:
+        categories = list(style.get("categories", []))
+        colors = [category["color"] for category in categories]
+        values = [float(category["value"]) for category in categories]
+        if not values:
+            raise ValueError("categorical_fill requires at least one category")
+        ordered = sorted(zip(values, colors), key=lambda item: item[0])
+        ordered_values = [item[0] for item in ordered]
+        ordered_colors = [item[1] for item in ordered]
+        boundaries: list[float] = []
+        for index, value in enumerate(ordered_values):
+            if index == 0:
+                boundaries.append(value - 0.5)
+            else:
+                boundaries.append((ordered_values[index - 1] + value) / 2.0)
+        boundaries.append(ordered_values[-1] + 0.5)
+        cmap = mcolors.ListedColormap(ordered_colors)
+        norm = mcolors.BoundaryNorm(boundaries, cmap.N)
+        x_mesh, y_mesh = mesh
+        axis.pcolormesh(
+            x_mesh,
+            y_mesh,
+            field,
+            shading="auto",
+            cmap=cmap,
+            norm=norm,
+            alpha=float(draw.get("alpha", 1.0)),
+            zorder=float(draw.get("zorder") or _default_zorder("categorical_fill")),
+        )
+        return
+
     rgba = np.zeros(field.shape + (4,), dtype=float)
     draw_alpha = float(draw.get("alpha", 1.0))
     for category in style.get("categories", []):
@@ -877,16 +1388,18 @@ def _render_layer(
     *,
     draw: dict[str, Any],
     units: str | None,
+    x_coords: np.ndarray | None = None,
+    y_coords: np.ndarray | None = None,
 ) -> None:
     kind = str(draw.get("kind") or "")
     if kind == "raster":
-        _render_raster(axis, figure, field, draw=draw, units=units)
+        _render_raster(axis, figure, field, draw=draw, units=units, x_coords=x_coords, y_coords=y_coords)
         return
     if kind == "contour":
-        _render_contour(axis, field, draw=draw)
+        _render_contour(axis, field, draw=draw, x_coords=x_coords, y_coords=y_coords)
         return
     if kind == "categorical_fill":
-        _render_categorical_fill(axis, field, draw=draw)
+        _render_categorical_fill(axis, field, draw=draw, x_coords=x_coords, y_coords=y_coords)
         return
     raise ValueError(f"Unsupported draw.kind: {kind}")
 
@@ -1097,7 +1610,10 @@ class FigureEvaluator:
             tuple[np.ndarray, str | None],
         ] = {}
         self.diagnostic_cache: dict[tuple[str, int, str], tuple[np.ndarray, str | None]] = {}
-        self.layer_cache: dict[tuple[str, int | None], tuple[np.ndarray, str | None]] = {}
+        self.horizontal_coord_cache: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] = {}
+        self.mass_height_cache: dict[tuple[str, int], np.ndarray] = {}
+        self.layer_cube_cache: dict[tuple[str, int | None], FieldCube] = {}
+        self.time_cube_cache: dict[str, FieldCube] = {}
 
     def _cache_key(self, layer_id: str, current_frame: dict[str, Any] | None) -> tuple[str, int | None]:
         if current_frame is None:
@@ -1156,6 +1672,61 @@ class FigureEvaluator:
             field, units = _load_3d_var_full(dataset, name, int(frame["time_index"]))
         self.variable_3d_full_cache[key] = (field, units)
         return field, units
+
+    def load_horizontal_coords(
+        self,
+        frame: dict[str, Any],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        key = (posix_path(frame["path"]), int(frame["time_index"]))
+        cached = self.horizontal_coord_cache.get(key)
+        if cached is not None:
+            return cached
+
+        with Dataset(frame["path"]) as dataset:
+            xlat = dataset.variables.get("XLAT")
+            xlong = dataset.variables.get("XLONG")
+            if xlat is None or xlong is None:
+                raise KeyError("Path-coordinate views require XLAT and XLONG in wrfout files")
+
+            def _read_coord(variable: Any) -> np.ndarray:
+                raw = variable[int(frame["time_index"])] if variable.ndim >= 3 else variable[:]
+                field = np.asarray(np.ma.filled(raw, np.nan), dtype=float)
+                if field.ndim != 2:
+                    raise ValueError(
+                        f"Expected 2D coordinate field for {getattr(variable, 'name', 'coord')}, received ndim={field.ndim}"
+                    )
+                return field
+
+            payload = (_read_coord(xlat), _read_coord(xlong))
+        self.horizontal_coord_cache[key] = payload
+        return payload
+
+    def load_mass_height(
+        self,
+        frame: dict[str, Any],
+    ) -> np.ndarray:
+        key = (posix_path(frame["path"]), int(frame["time_index"]))
+        cached = self.mass_height_cache.get(key)
+        if cached is not None:
+            return cached
+
+        with Dataset(frame["path"]) as dataset:
+            ph = dataset.variables.get("PH")
+            phb = dataset.variables.get("PHB")
+            if ph is None or phb is None:
+                raise KeyError("height_m views require PH and PHB in wrfout files")
+            ph_raw = ph[int(frame["time_index"])] if ph.ndim >= 4 else ph[:]
+            phb_raw = phb[int(frame["time_index"])] if phb.ndim >= 4 else phb[:]
+            geopotential = np.asarray(np.ma.filled(ph_raw, np.nan), dtype=float) + np.asarray(
+                np.ma.filled(phb_raw, np.nan),
+                dtype=float,
+            )
+            if geopotential.ndim != 3:
+                raise ValueError(f"Expected 3D geopotential field, received ndim={geopotential.ndim}")
+            payload = 0.5 * (geopotential[:-1] + geopotential[1:]) / 9.81
+
+        self.mass_height_cache[key] = payload
+        return payload
 
     def load_diagnostic(
         self,
@@ -1232,13 +1803,13 @@ class FigureEvaluator:
             f"source.kind is recognized but not implemented yet: {source_kind}"
         )
 
-    def evaluate_layer(
+    def evaluate_layer_cube(
         self,
         layer_id: str,
         current_frame: dict[str, Any],
-    ) -> tuple[np.ndarray, str | None]:
+    ) -> FieldCube:
         cache_key = self._cache_key(layer_id, current_frame)
-        cached = self.layer_cache.get(cache_key)
+        cached = self.layer_cube_cache.get(cache_key)
         if cached is not None:
             return cached
 
@@ -1256,8 +1827,67 @@ class FigureEvaluator:
         )
         units = layer_def.get("units")
         units_value = None if units is None else str(units)
-        payload = (field, units_value)
-        self.layer_cache[cache_key] = payload
+        payload = _build_field_cube(
+            field,
+            dims=_dims_for_field(field, label=f"layer_defs.{layer_id}"),
+            units=units_value,
+            metadata={
+                "layer_id": layer_id,
+                "source_kind": source_kind,
+            },
+            label=f"layer_defs.{layer_id}",
+        )
+        self.layer_cube_cache[cache_key] = payload
+        return payload
+
+    def evaluate_layer(
+        self,
+        layer_id: str,
+        current_frame: dict[str, Any],
+    ) -> tuple[np.ndarray, str | None]:
+        cube = self.evaluate_layer_cube(layer_id, current_frame)
+        return cube.values, cube.units
+
+    def build_time_cube(self, layer_id: str) -> FieldCube:
+        cached = self.time_cube_cache.get(layer_id)
+        if cached is not None:
+            return cached
+
+        cubes: list[FieldCube] = []
+        first_cube: FieldCube | None = None
+        for index, frame in enumerate(self.frames):
+            cube = self.evaluate_layer_cube(layer_id, frame)
+            cubes.append(cube)
+            if first_cube is None:
+                first_cube = cube
+                continue
+            if cube.dims != first_cube.dims:
+                raise ValueError(
+                    f"layer_defs.{layer_id} frame {index} changed dims from {first_cube.dims} to {cube.dims}"
+                )
+            if cube.values.shape != first_cube.values.shape:
+                raise ValueError(
+                    f"layer_defs.{layer_id} frame {index} changed shape from {first_cube.values.shape} to {cube.values.shape}"
+                )
+
+        if first_cube is None:
+            raise ValueError("Cannot build section field from an empty frame list")
+
+        coords = {"time": np.arange(len(cubes), dtype=float)}
+        for dim, values in (first_cube.coords or {}).items():
+            coords[dim] = np.asarray(values, dtype=float)
+
+        metadata = deepcopy(first_cube.metadata)
+        metadata["frame_count"] = len(cubes)
+        payload = _build_field_cube(
+            np.stack([cube.values for cube in cubes], axis=0),
+            dims=("time",) + first_cube.dims,
+            units=first_cube.units,
+            metadata=metadata,
+            coords=coords,
+            label=f"layer_defs.{layer_id}",
+        )
+        self.time_cube_cache[layer_id] = payload
         return payload
 
     def _evaluate_node(
@@ -1374,7 +2004,8 @@ def run_figure_request(
         uses_current = expression_uses_current or _view_time_selector_mode(view_spec) == "current"
 
     artifacts: list[dict[str, Any]] = []
-    for _, group in _group_frames_by_domain(frames):
+    grouped_frames = _group_frames_by_domain(frames)
+    for _, group in grouped_frames:
         if not group:
             continue
 
@@ -1382,7 +2013,7 @@ def run_figure_request(
         output_targets = group if uses_current else [group[-1]]
         if _view_has_axis(view_spec, "time"):
             output_targets = [group[-1]]
-        allow_exact_path = len(output_targets) == 1 and len(_group_frames_by_domain(frames)) == 1
+        allow_exact_path = len(output_targets) == 1 and len(grouped_frames) == 1
         output_cfg = figure_spec.get("output", {})
         overwrite = bool(output_cfg.get("overwrite", False))
         sidecar_enabled = bool(output_cfg.get("sidecar_json", True))
@@ -1439,10 +2070,24 @@ def run_figure_request(
                         )
                     u_layer_id = str(render_layer["u_layer_id"])
                     v_layer_id = str(render_layer["v_layer_id"])
-                    u_field_raw, _ = evaluator.evaluate_layer(u_layer_id, target)
-                    v_field_raw, _ = evaluator.evaluate_layer(v_layer_id, target)
-                    u_field = _ensure_2d_field(u_field_raw, label=f"layer_defs.{u_layer_id}")
-                    v_field = _ensure_2d_field(v_field_raw, label=f"layer_defs.{v_layer_id}")
+                    u_cube = evaluator.evaluate_layer_cube(u_layer_id, target)
+                    v_cube = evaluator.evaluate_layer_cube(v_layer_id, target)
+                    u_view = _resolve_view_field(
+                        u_cube,
+                        view_spec,
+                        current_time_index=current_time_index,
+                        evaluator=evaluator,
+                        frames=group,
+                    )
+                    v_view = _resolve_view_field(
+                        v_cube,
+                        view_spec,
+                        current_time_index=current_time_index,
+                        evaluator=evaluator,
+                        frames=group,
+                    )
+                    u_field = u_view.values
+                    v_field = v_view.values
                     magnitude = np.sqrt(u_field**2 + v_field**2)
                     u_summary = _summary(u_field)
                     v_summary = _summary(v_field)
@@ -1482,18 +2127,19 @@ def run_figure_request(
                     continue
 
                 layer_id = str(render_layer["layer_id"])
-                units: str | None
                 if map_view:
-                    field_raw, units = evaluator.evaluate_layer(layer_id, target)
-                    field = _ensure_2d_field(field_raw, label=f"layer_defs.{layer_id}")
+                    cube = evaluator.evaluate_layer_cube(layer_id, target)
                 else:
-                    stacked, dims, units = _stack_layer_over_time(evaluator, layer_id, group)
-                    field = _extract_view_field(
-                        stacked,
-                        dims,
-                        view_spec,
-                        current_time_index=current_time_index,
-                    )
+                    cube = evaluator.build_time_cube(layer_id)
+                resolved_field = _resolve_view_field(
+                    cube,
+                    view_spec,
+                    current_time_index=current_time_index,
+                    evaluator=evaluator,
+                    frames=group,
+                )
+                field = resolved_field.values
+                units = resolved_field.units
                 layer_summaries[layer_id] = _summary(field)
                 resolved_layers.append(
                     {
@@ -1506,14 +2152,22 @@ def run_figure_request(
                         "source": deepcopy(layer_defs[layer_id].get("source") or {}),
                         "units": layer_defs[layer_id].get("units"),
                         "view_axes": {
-                            "x": _view_axis_name(view_spec.get("x_axis")),
-                            "y": _view_axis_name(view_spec.get("y_axis")),
+                            "x": str(resolved_field.x_axis.get("name") or ""),
+                            "y": str(resolved_field.y_axis.get("name") or ""),
                         },
                         "draw": deepcopy(draw),
                     }
                 )
                 if not dry_run and axis is not None and figure is not None:
-                    _render_layer(axis, figure, field, draw=draw, units=units)
+                    _render_layer(
+                        axis,
+                        figure,
+                        field,
+                        draw=draw,
+                        units=units,
+                        x_coords=resolved_field.x_coords,
+                        y_coords=resolved_field.y_coords,
+                    )
 
             payload = _artifact_payload(
                 figure_spec,

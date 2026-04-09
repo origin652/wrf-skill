@@ -23,12 +23,23 @@ SUPPORTED_SOURCE_KINDS = {
     "wrf_native_3d_full",
     "wrf_diag",
 }
-SUPPORTED_VIEW_AXES = {
+SUPPORTED_NATIVE_VIEW_AXES = {
     "time",
     "bottom_top",
     "south_north",
     "west_east",
 }
+SUPPORTED_DERIVED_VIEW_AXES = {
+    "height_m",
+}
+SUPPORTED_PATH_VIEW_AXES = {
+    "distance_km",
+}
+SUPPORTED_VIEW_AXES = (
+    SUPPORTED_NATIVE_VIEW_AXES
+    | SUPPORTED_DERIVED_VIEW_AXES
+    | SUPPORTED_PATH_VIEW_AXES
+)
 ROOT_RESERVED_KEYS = {
     "schema_version",
     "project_name",
@@ -740,6 +751,21 @@ def _view_axis_name(axis: Any) -> str:
     return str(axis).strip()
 
 
+def _view_axis_kind(axis: Any) -> str:
+    if isinstance(axis, dict):
+        raw_kind = axis.get("kind")
+        if isinstance(raw_kind, str) and raw_kind.strip():
+            return raw_kind.strip()
+    name = _view_axis_name(axis)
+    if name in SUPPORTED_NATIVE_VIEW_AXES:
+        return "native_dim"
+    if name in SUPPORTED_DERIVED_VIEW_AXES:
+        return "derived_coord"
+    if name in SUPPORTED_PATH_VIEW_AXES:
+        return "path_coord"
+    return ""
+
+
 def _is_map_view(view: dict[str, Any]) -> bool:
     x_axis = _view_axis_name(view.get("x_axis"))
     y_axis = _view_axis_name(view.get("y_axis"))
@@ -762,12 +788,29 @@ def _validate_view_def(view_id: str, view_def: Any, errors: list[str], *, prefix
         if not isinstance(axis_value, dict):
             errors.append(f"{axis_prefix} must be an object")
             continue
+        axis_kind = _view_axis_kind(axis_value)
+        if axis_kind not in {"native_dim", "derived_coord", "path_coord"}:
+            errors.append(
+                f"{axis_prefix}.kind must be one of derived_coord, native_dim, path_coord"
+            )
         token = _view_axis_name(axis_value)
         if not token:
             errors.append(f"{axis_prefix}.name must be a non-empty string")
         elif token not in SUPPORTED_VIEW_AXES:
             errors.append(
                 f"{axis_prefix}.name must be one of {', '.join(sorted(SUPPORTED_VIEW_AXES))}"
+            )
+        elif axis_kind == "native_dim" and token not in SUPPORTED_NATIVE_VIEW_AXES:
+            errors.append(
+                f"{axis_prefix}.name={token} is not valid for kind=native_dim"
+            )
+        elif axis_kind == "derived_coord" and token not in SUPPORTED_DERIVED_VIEW_AXES:
+            errors.append(
+                f"{axis_prefix}.name={token} is not valid for kind=derived_coord"
+            )
+        elif axis_kind == "path_coord" and token not in SUPPORTED_PATH_VIEW_AXES:
+            errors.append(
+                f"{axis_prefix}.name={token} is not valid for kind=path_coord"
             )
         for optional_key in ("label", "units"):
             optional_value = axis_value.get(optional_key)
@@ -783,16 +826,16 @@ def _validate_view_def(view_id: str, view_def: Any, errors: list[str], *, prefix
 
     selectors = view_def.get("selectors")
     if selectors is None:
-        return
+        selectors = {}
     if not isinstance(selectors, dict):
         errors.append(f"{item_prefix}.selectors must be an object")
-        return
+        selectors = {}
 
     for dim, selector in selectors.items():
         selector_prefix = f"{item_prefix}.selectors.{dim}"
-        if dim not in SUPPORTED_VIEW_AXES:
+        if dim not in SUPPORTED_NATIVE_VIEW_AXES:
             errors.append(
-                f"{selector_prefix} uses unsupported dimension, expected one of {', '.join(sorted(SUPPORTED_VIEW_AXES))}"
+                f"{selector_prefix} uses unsupported dimension, expected one of {', '.join(sorted(SUPPORTED_NATIVE_VIEW_AXES))}"
             )
             continue
         if not isinstance(selector, dict):
@@ -811,6 +854,47 @@ def _validate_view_def(view_id: str, view_def: Any, errors: list[str], *, prefix
             index = selector.get("index")
             if not isinstance(index, int) or index < 0:
                 errors.append(f"{selector_prefix}.index must be a non-negative integer for mode=index")
+
+    x_kind = _view_axis_kind(x_axis)
+    y_kind = _view_axis_kind(y_axis)
+    if "path_coord" in {x_kind, y_kind}:
+        if x_kind != "path_coord":
+            errors.append(f"{item_prefix} currently requires path_coord axes to be assigned to x_axis")
+        sampling = view_def.get("sampling")
+        sampling_prefix = f"{item_prefix}.sampling"
+        if not isinstance(sampling, dict):
+            errors.append(f"{sampling_prefix} must be an object when using path_coord axes")
+            return
+        path_cfg = sampling.get("path")
+        path_prefix = f"{sampling_prefix}.path"
+        if not isinstance(path_cfg, dict):
+            errors.append(f"{path_prefix} must be an object when using path_coord axes")
+            return
+        kind = path_cfg.get("kind")
+        if kind != "polyline":
+            errors.append(f"{path_prefix}.kind must equal polyline")
+        points = path_cfg.get("points")
+        if not isinstance(points, list) or len(points) < 2:
+            errors.append(f"{path_prefix}.points must be a list with at least two points")
+        else:
+            for index, point in enumerate(points):
+                point_prefix = f"{path_prefix}.points[{index}]"
+                if not isinstance(point, dict):
+                    errors.append(f"{point_prefix} must be an object")
+                    continue
+                for key in ("lat", "lon"):
+                    value = point.get(key)
+                    if not isinstance(value, (int, float)):
+                        errors.append(f"{point_prefix}.{key} must be numeric")
+        samples = path_cfg.get("samples")
+        if not isinstance(samples, int) or samples < 2:
+            errors.append(f"{path_prefix}.samples must be an integer >= 2")
+        if x_name != "distance_km":
+            errors.append(f"{item_prefix}.x_axis.name must be distance_km for first-pass path sections")
+        if y_name not in {"bottom_top", "height_m"}:
+            errors.append(
+                f"{item_prefix}.y_axis.name must be bottom_top or height_m for first-pass path sections"
+            )
 
 
 def _resolve_figure_view(

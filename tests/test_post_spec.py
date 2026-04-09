@@ -241,6 +241,55 @@ class PostSpecTests(unittest.TestCase):
 
         self.assertTrue(any("only supported for map views" in error for error in errors))
 
+    def test_validate_accepts_distance_height_path_view(self) -> None:
+        payload = normalize_post_spec(
+            {
+                "project_name": "case-distance-height",
+                "view_defs": {
+                    "distance_height": {
+                        "x_axis": {"kind": "path_coord", "name": "distance_km"},
+                        "y_axis": {"kind": "derived_coord", "name": "height_m"},
+                        "selectors": {
+                            "time": {"mode": "current"},
+                        },
+                        "sampling": {
+                            "path": {
+                                "kind": "polyline",
+                                "points": [
+                                    {"lat": 31.20, "lon": 121.40},
+                                    {"lat": 31.80, "lon": 122.10},
+                                ],
+                                "samples": 50,
+                            }
+                        },
+                    }
+                },
+                "layer_defs": {
+                    "qvapor_cube_gkg": {
+                        "source": {"kind": "wrf_native_3d_full"},
+                        "expr": "QVAPOR * 1000",
+                        "units": "g kg-1",
+                    }
+                },
+                "figures": [
+                    {
+                        "figure_id": "fig-1",
+                        "view_id": "distance_height",
+                        "layers": [
+                            {
+                                "layer_id": "qvapor_cube_gkg",
+                                "draw": {"kind": "raster", "style": {}},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        errors = validate_post_spec(payload)
+
+        self.assertEqual(errors, [])
+
     def test_validate_rejects_wrf_native_3d_without_level_selector(self) -> None:
         payload = normalize_post_spec(
             {

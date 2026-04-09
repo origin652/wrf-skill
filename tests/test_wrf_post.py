@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -49,6 +50,14 @@ def resolve_repo_path(raw_path: str) -> Path:
     return path.resolve()
 
 
+def pcolormesh_warning_messages(caught: list) -> list[str]:
+    return [
+        str(item.message)
+        for item in caught
+        if "pcolormesh" in str(item.message).lower()
+    ]
+
+
 def _write_times(dataset: Dataset, times: list[str]) -> None:
     times_var = dataset.createVariable("Times", "S1", ("Time", "DateStrLen"))
     encoded = np.empty((len(times), 19), dtype="S1")
@@ -68,15 +77,21 @@ def write_wrfout_netcdf(
     rainnc: list[np.ndarray],
     hgt: np.ndarray | None = None,
     landmask: np.ndarray | None = None,
+    lat: np.ndarray | None = None,
+    lon: np.ndarray | None = None,
     extra_2d_fields: dict[str, tuple[list[np.ndarray], str | None]] | None = None,
     extra_3d_fields: dict[str, tuple[list[np.ndarray], str | None]] | None = None,
+    extra_stag_3d_fields: dict[str, tuple[list[np.ndarray], str | None]] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     sample = np.asarray(t2[0], dtype=float)
     terrain = np.asarray(hgt if hgt is not None else np.zeros_like(sample), dtype=float)
     mask = np.asarray(landmask if landmask is not None else np.ones_like(sample), dtype=float)
+    latitude = np.asarray(lat if lat is not None else np.zeros_like(sample), dtype=float)
+    longitude = np.asarray(lon if lon is not None else np.zeros_like(sample), dtype=float)
     field_2d_defs = extra_2d_fields or {}
     field_3d_defs = extra_3d_fields or {}
+    field_stag_3d_defs = extra_stag_3d_fields or {}
 
     with Dataset(path, "w", format="NETCDF4") as dataset:
         dataset.createDimension("Time", len(times))
@@ -94,6 +109,17 @@ def write_wrfout_netcdf(
                 elif level_count != int(shape[0]):
                     raise ValueError("extra_3d_fields must share the same vertical level count")
             dataset.createDimension("bottom_top", int(level_count or 0))
+        if field_stag_3d_defs:
+            stag_level_count = None
+            for values, _ in field_stag_3d_defs.values():
+                shape = np.asarray(values[0], dtype=float).shape
+                if len(shape) != 3:
+                    raise ValueError("extra_stag_3d_fields values must have shape (levels, y, x)")
+                if stag_level_count is None:
+                    stag_level_count = int(shape[0])
+                elif stag_level_count != int(shape[0]):
+                    raise ValueError("extra_stag_3d_fields must share the same vertical level count")
+            dataset.createDimension("bottom_top_stag", int(stag_level_count or 0))
         _write_times(dataset, times)
 
         def write_field(name: str, values: list[np.ndarray], units: str) -> None:
@@ -125,15 +151,29 @@ def write_wrfout_netcdf(
                 variable.units = units
             variable[:, :, :, :] = np.stack(values, axis=0)
 
+        def write_field_3d_stag(name: str, values: list[np.ndarray], units: str | None) -> None:
+            variable = dataset.createVariable(
+                name,
+                "f4",
+                ("Time", "bottom_top_stag", "south_north", "west_east"),
+            )
+            if units is not None:
+                variable.units = units
+            variable[:, :, :, :] = np.stack(values, axis=0)
+
         write_field("T2", t2, "K")
         write_field("U10", u10, "m s-1")
         write_field("V10", v10, "m s-1")
         write_field("RAINC", rainc, "mm")
         write_field("RAINNC", rainnc, "mm")
+        write_field("XLAT", [latitude for _ in times], "degrees_north")
+        write_field("XLONG", [longitude for _ in times], "degrees_east")
         for field_name, (values, units) in field_2d_defs.items():
             write_field(field_name, values, units or "")
         for field_name, (values, units) in field_3d_defs.items():
             write_field_3d(field_name, values, units)
+        for field_name, (values, units) in field_stag_3d_defs.items():
+            write_field_3d_stag(field_name, values, units)
         write_static_field("HGT", terrain, "m")
         write_static_field("LANDMASK", mask, None)
 
@@ -499,15 +539,18 @@ class FigureRenderingTests(unittest.TestCase):
             ],
         }
 
-        artifacts = run_figure_request(
-            figure_spec,
-            build_layer_defs(),
-            selected_frames,
-            runs_dir,
-            dry_run=False,
-        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
 
         self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
         artifact = artifacts[0]
         self.assertIsNone(artifact["current_frame"])
         self.assertTrue(Path(artifact["path"]).exists())
@@ -709,15 +752,18 @@ class FigureRenderingTests(unittest.TestCase):
             ],
         }
 
-        artifacts = run_figure_request(
-            figure_spec,
-            build_layer_defs(),
-            selected_frames,
-            runs_dir,
-            dry_run=False,
-        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
 
         self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
         artifact = artifacts[0]
         self.assertTrue(Path(artifact["path"]).exists())
         self.assertTrue(Path(artifact["sidecar_path"]).exists())
@@ -886,6 +932,180 @@ class FigureRenderingTests(unittest.TestCase):
         self.assertEqual(artifact["view"]["x_axis"]["name"], "time")
         self.assertEqual(artifact["view"]["y_axis"]["name"], "bottom_top")
         self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 4.5, places=6)
+
+    def test_run_figure_request_supports_distance_height_path_view(self) -> None:
+        runs_dir = make_test_dir("_test_v2_distance_height_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        lat = np.array([[10.0, 10.0, 10.0], [11.0, 11.0, 11.0]], dtype=float)
+        lon = np.array([[100.0, 101.0, 102.0], [100.0, 101.0, 102.0]], dtype=float)
+        qvapor_gkg = np.array(
+            [
+                [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+                [[11.0, 12.0, 13.0], [14.0, 15.0, 16.0]],
+            ],
+            dtype=float,
+        )
+        ph_interfaces = np.array(
+            [
+                [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                [[200.0, 300.0, 400.0], [500.0, 600.0, 700.0]],
+                [[1800.0, 1800.0, 1800.0], [2000.0, 2000.0, 2000.0]],
+            ],
+            dtype=float,
+        ) * 9.81
+
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00"],
+            t2=[np.full((2, 3), 300.0)],
+            u10=[np.ones((2, 3))],
+            v10=[np.ones((2, 3))],
+            rainc=[np.zeros((2, 3))],
+            rainnc=[np.zeros((2, 3))],
+            lat=lat,
+            lon=lon,
+            extra_3d_fields={
+                "QVAPOR": ([qvapor_gkg / 1000.0], "kg kg-1"),
+            },
+            extra_stag_3d_fields={
+                "PH": ([ph_interfaces], "m2 s-2"),
+                "PHB": ([np.zeros_like(ph_interfaces)], "m2 s-2"),
+            },
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0]})
+        output_path = runs_dir / "distance-height-qvapor.png"
+        figure_spec = {
+            "figure_id": "distance_height_qvapor",
+            "view": {
+                "x_axis": {"kind": "path_coord", "name": "distance_km"},
+                "y_axis": {"kind": "derived_coord", "name": "height_m"},
+                "selectors": {},
+                "sampling": {
+                    "path": {
+                        "kind": "polyline",
+                        "points": [
+                            {"lat": 10.0, "lon": 100.0},
+                            {"lat": 10.0, "lon": 102.0},
+                        ],
+                        "samples": 3,
+                    }
+                },
+            },
+            "render": {"format": "png", "title": "Distance-Height QVAPOR", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "distance-height-qvapor",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": True},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertTrue(Path(artifact["path"]).exists())
+        self.assertTrue(Path(artifact["sidecar_path"]).exists())
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 7.0, places=6)
+
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["name"], "distance_km")
+        self.assertEqual(sidecar["view"]["y_axis"]["name"], "height_m")
+        self.assertEqual(len(sidecar["resolved_layers"]), 1)
+
+    def test_run_figure_request_real_path_view_avoids_pcolormesh_warning(self) -> None:
+        runs_dir = make_test_dir("_test_real_distance_height_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        real_state = load_json(REAL_PROJECT_JSON)
+        wrfout_path = resolve_repo_path(real_state["artifacts"]["wrfout_files"][0])
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0]})
+        output_path = runs_dir / "distance-height-qvapor-real.png"
+        figure_spec = {
+            "figure_id": "distance_height_qvapor_real",
+            "view": {
+                "x_axis": {"kind": "path_coord", "name": "distance_km"},
+                "y_axis": {"kind": "derived_coord", "name": "height_m"},
+                "selectors": {},
+                "sampling": {
+                    "path": {
+                        "kind": "polyline",
+                        "points": [
+                            {"lat": 30.9, "lon": 121.0},
+                            {"lat": 31.3, "lon": 121.6},
+                        ],
+                        "samples": 24,
+                    }
+                },
+            },
+            "render": {"format": "png", "title": "Real Distance-Height QVAPOR", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "distance-height-qvapor-real",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": True},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertTrue(Path(artifact["path"]).exists())
+        self.assertTrue(Path(artifact["sidecar_path"]).exists())
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 6.708195225813376, places=6)
+
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["name"], "distance_km")
+        self.assertEqual(sidecar["view"]["y_axis"]["name"], "height_m")
+        self.assertEqual(sidecar["selected_frames"][0]["valid_time"], "2024-07-20_00:00:00")
 
 
 class WrfPostProjectTests(unittest.TestCase):
