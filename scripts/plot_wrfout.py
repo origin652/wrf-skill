@@ -44,7 +44,14 @@ SUPPORTED_SOURCE_KINDS = {
     "wrf_native",
     "wrf_native_2d",
     "wrf_native_3d",
+    "wrf_native_3d_full",
     "wrf_diag",
+}
+SUPPORTED_VIEW_AXES = {
+    "time",
+    "bottom_top",
+    "south_north",
+    "west_east",
 }
 FUNCTION_NAMES = {
     "sqrt",
@@ -105,6 +112,127 @@ pp.ParserElement.enable_packrat()
 
 def posix_path(path: Path | str) -> str:
     return Path(path).as_posix()
+
+
+def default_view_spec() -> dict[str, Any]:
+    return {
+        "x_axis": {"name": "west_east"},
+        "y_axis": {"name": "south_north"},
+        "selectors": {},
+    }
+
+
+def _view_axis_name(axis: Any) -> str:
+    if isinstance(axis, dict):
+        token = axis.get("name")
+        return str(token).strip() if token is not None else ""
+    if axis is None:
+        return ""
+    return str(axis).strip()
+
+
+def _normalize_view_axis(raw_axis: Any, *, fallback_name: str) -> dict[str, Any]:
+    normalized: dict[str, Any] = {
+        "name": fallback_name,
+        "label": None,
+        "units": None,
+    }
+    if isinstance(raw_axis, dict):
+        for key, value in raw_axis.items():
+            if key not in {"name", "label", "units"}:
+                normalized[key] = deepcopy(value)
+        if raw_axis.get("name") is not None:
+            normalized["name"] = raw_axis.get("name")
+        if raw_axis.get("label") is not None:
+            normalized["label"] = raw_axis.get("label")
+        if raw_axis.get("units") is not None:
+            normalized["units"] = raw_axis.get("units")
+        return normalized
+    if raw_axis is not None:
+        normalized["name"] = raw_axis
+    return normalized
+
+
+def _normalize_view_spec(raw_view: Any) -> dict[str, Any]:
+    base = default_view_spec()
+    if not isinstance(raw_view, dict):
+        return base
+
+    normalized: dict[str, Any] = {
+        key: deepcopy(value)
+        for key, value in raw_view.items()
+        if key not in {"x_axis", "y_axis", "selectors"}
+    }
+    normalized["x_axis"] = _normalize_view_axis(
+        raw_view.get("x_axis"),
+        fallback_name=str(base["x_axis"]["name"]),
+    )
+    normalized["y_axis"] = _normalize_view_axis(
+        raw_view.get("y_axis"),
+        fallback_name=str(base["y_axis"]["name"]),
+    )
+    selectors = raw_view.get("selectors")
+    if isinstance(selectors, dict):
+        normalized["selectors"] = {
+            str(dim): deepcopy(selector)
+            for dim, selector in selectors.items()
+        }
+    else:
+        normalized["selectors"] = {}
+    return normalized
+
+
+def _resolve_figure_view(
+    figure_spec: dict[str, Any],
+    view_defs: dict[str, dict[str, Any]] | None,
+) -> tuple[dict[str, Any], str | None]:
+    inline_view = figure_spec.get("view")
+    if isinstance(inline_view, dict):
+        return _normalize_view_spec(inline_view), None
+
+    view_id = figure_spec.get("view_id")
+    if isinstance(view_id, str) and isinstance(view_defs, dict):
+        view_def = view_defs.get(view_id)
+        if isinstance(view_def, dict):
+            return _normalize_view_spec(view_def), view_id
+
+    return default_view_spec(), None
+
+
+def _view_has_axis(view_spec: dict[str, Any], axis_name: str) -> bool:
+    return axis_name in {
+        _view_axis_name(view_spec.get("x_axis")),
+        _view_axis_name(view_spec.get("y_axis")),
+    }
+
+
+def _is_map_view(view_spec: dict[str, Any]) -> bool:
+    x_axis = _view_axis_name(view_spec.get("x_axis"))
+    y_axis = _view_axis_name(view_spec.get("y_axis"))
+    return {x_axis, y_axis} == {"west_east", "south_north"}
+
+
+def _view_time_selector_mode(view_spec: dict[str, Any]) -> str | None:
+    selectors = view_spec.get("selectors")
+    if not isinstance(selectors, dict):
+        return None
+    selector = selectors.get("time")
+    if not isinstance(selector, dict):
+        return None
+    mode = selector.get("mode")
+    if not isinstance(mode, str):
+        return None
+    token = mode.strip().lower()
+    return token or None
+
+
+def _axis_label(view_axis: Any) -> str:
+    if isinstance(view_axis, dict):
+        label = view_axis.get("label")
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+    name = _view_axis_name(view_axis)
+    return name or "axis"
 
 
 def ensure_plotting_dependencies() -> None:
@@ -362,6 +490,24 @@ def _load_3d_var(
     return level_field, getattr(variable, "units", None)
 
 
+def _load_3d_var_full(
+    dataset: Dataset,
+    name: str,
+    time_index: int,
+) -> tuple[np.ndarray, str | None]:
+    variable = dataset.variables.get(name)
+    if variable is None:
+        raise KeyError(f"Missing WRF variable: {name}")
+
+    raw = variable[time_index] if variable.ndim >= 4 else variable[:]
+    field = np.asarray(np.ma.filled(raw, np.nan), dtype=float)
+    if field.ndim != 3:
+        raise ValueError(
+            f"Expected 3D field for {name}, received ndim={field.ndim}"
+        )
+    return field, getattr(variable, "units", None)
+
+
 def _normalize_source_kind(kind: str | None) -> str:
     token = str(kind or "wrf_native").strip()
     return SOURCE_KIND_ALIASES.get(token, token)
@@ -461,6 +607,8 @@ def _artifact_payload(
     selected_frames: list[dict[str, Any]],
     current_frame: dict[str, Any] | None,
     title: str,
+    view: dict[str, Any],
+    view_id: str | None,
     resolved_layers: list[dict[str, Any]],
     layer_summaries: dict[str, dict[str, float | None]],
 ) -> dict[str, Any]:
@@ -480,6 +628,8 @@ def _artifact_payload(
         "current_frame": _serialize_frame(current_frame),
         "selected_frames": _serialize_frames(selected_frames),
         "source_files": source_files,
+        "view_id": view_id,
+        "view": view,
         "resolved_layers": resolved_layers,
         "layer_summaries": layer_summaries,
     }
@@ -490,6 +640,146 @@ def _ensure_2d_field(value: Any, *, label: str) -> np.ndarray:
     if field.ndim != 2:
         raise ValueError(f"{label} must resolve to a 2D field, received ndim={field.ndim}")
     return field
+
+
+def _stack_layer_over_time(
+    evaluator: "FigureEvaluator",
+    layer_id: str,
+    frames: list[dict[str, Any]],
+) -> tuple[np.ndarray, tuple[str, ...], str | None]:
+    values: list[np.ndarray] = []
+    units: str | None = None
+    for frame in frames:
+        field, field_units = evaluator.evaluate_layer(layer_id, frame)
+        array = np.asarray(np.ma.filled(field, np.nan), dtype=float)
+        values.append(array)
+        if units is None:
+            units = field_units
+
+    if not values:
+        raise ValueError("Cannot build section field from an empty frame list")
+
+    first = values[0]
+    ndim = int(first.ndim)
+    if ndim not in {2, 3}:
+        raise ValueError(
+            f"layer_defs.{layer_id} resolved to unsupported ndim={ndim}; expected 2D or 3D for section views"
+        )
+    for index, value in enumerate(values[1:], start=1):
+        if value.ndim != ndim:
+            raise ValueError(
+                f"layer_defs.{layer_id} frame {index} changed ndim from {ndim} to {value.ndim}"
+            )
+        if value.shape != first.shape:
+            raise ValueError(
+                f"layer_defs.{layer_id} frame {index} changed shape from {first.shape} to {value.shape}"
+            )
+
+    stacked = np.stack(values, axis=0)
+    if ndim == 2:
+        return stacked, ("time", "south_north", "west_east"), units
+    return stacked, ("time", "bottom_top", "south_north", "west_east"), units
+
+
+def _selector_mode(selector: Any) -> str | None:
+    if not isinstance(selector, dict):
+        return None
+    mode = selector.get("mode")
+    if not isinstance(mode, str):
+        return None
+    token = mode.strip().lower()
+    return token or None
+
+
+def _selector_index(
+    dim: str,
+    selector: Any,
+    size: int,
+    *,
+    current_time_index: int | None,
+) -> int:
+    mode = _selector_mode(selector)
+    if mode is None:
+        mode = "current" if dim == "time" and current_time_index is not None else ("last" if dim == "time" else "first")
+        selector = {"mode": mode}
+
+    if mode == "first":
+        return 0
+    if mode == "last":
+        return size - 1
+    if mode == "current":
+        if dim != "time":
+            raise ValueError(f"selectors.{dim}.mode=current is only valid for the time axis")
+        if current_time_index is None:
+            raise ValueError("selectors.time.mode=current requires a current frame")
+        if current_time_index < 0 or current_time_index >= size:
+            raise ValueError(
+                f"current time index {current_time_index} is out of range for available times={size}"
+            )
+        return current_time_index
+    if mode == "index":
+        if not isinstance(selector, dict):
+            raise ValueError(f"selectors.{dim}.mode=index requires an object selector")
+        index = selector.get("index")
+        if not isinstance(index, int):
+            raise ValueError(f"selectors.{dim}.index must be an integer for mode=index")
+        if index < 0 or index >= size:
+            raise ValueError(
+                f"selectors.{dim}.index={index} is out of range for available size={size}"
+            )
+        return index
+    raise ValueError(
+        f"Unsupported selectors.{dim}.mode: {mode}. Expected one of current, first, index, last"
+    )
+
+
+def _extract_view_field(
+    stacked: np.ndarray,
+    dims: tuple[str, ...],
+    view_spec: dict[str, Any],
+    *,
+    current_time_index: int | None,
+) -> np.ndarray:
+    x_axis = _view_axis_name(view_spec.get("x_axis"))
+    y_axis = _view_axis_name(view_spec.get("y_axis"))
+    selectors = view_spec.get("selectors") if isinstance(view_spec.get("selectors"), dict) else {}
+
+    if x_axis not in SUPPORTED_VIEW_AXES or y_axis not in SUPPORTED_VIEW_AXES:
+        raise ValueError(
+            f"Unsupported view axes x={x_axis!r}, y={y_axis!r}; supported axes: {', '.join(sorted(SUPPORTED_VIEW_AXES))}"
+        )
+    if x_axis == y_axis:
+        raise ValueError("x_axis and y_axis must be different")
+
+    values = np.asarray(stacked, dtype=float)
+    active_dims = list(dims)
+    for dim in list(active_dims):
+        if dim in {x_axis, y_axis}:
+            continue
+        axis = active_dims.index(dim)
+        selector = selectors.get(dim) if isinstance(selectors, dict) else None
+        index = _selector_index(
+            dim,
+            selector,
+            int(values.shape[axis]),
+            current_time_index=current_time_index,
+        )
+        values = np.take(values, indices=index, axis=axis)
+        active_dims.pop(axis)
+
+    if x_axis not in active_dims or y_axis not in active_dims:
+        raise ValueError(
+            f"View axes x={x_axis}, y={y_axis} are not available for current layer dimensions {tuple(dims)}"
+        )
+    if len(active_dims) != 2:
+        raise ValueError(
+            f"View extraction expected exactly 2 remaining axes, received {len(active_dims)} ({active_dims})"
+        )
+
+    y_index = active_dims.index(y_axis)
+    x_index = active_dims.index(x_axis)
+    values = np.moveaxis(values, [y_index, x_index], [0, 1])
+    return _ensure_2d_field(values, label="view_extraction")
 
 
 def _render_raster(
@@ -802,6 +1092,10 @@ class FigureEvaluator:
             tuple[str, int, str, str],
             tuple[np.ndarray, str | None],
         ] = {}
+        self.variable_3d_full_cache: dict[
+            tuple[str, int, str],
+            tuple[np.ndarray, str | None],
+        ] = {}
         self.diagnostic_cache: dict[tuple[str, int, str], tuple[np.ndarray, str | None]] = {}
         self.layer_cache: dict[tuple[str, int | None], tuple[np.ndarray, str | None]] = {}
 
@@ -846,6 +1140,21 @@ class FigureEvaluator:
                 level_selector=level_selector,
             )
         self.variable_3d_cache[key] = (field, units)
+        return field, units
+
+    def load_variable_3d_full(
+        self,
+        frame: dict[str, Any],
+        name: str,
+    ) -> tuple[np.ndarray, str | None]:
+        key = (posix_path(frame["path"]), int(frame["time_index"]), name)
+        cached = self.variable_3d_full_cache.get(key)
+        if cached is not None:
+            return cached
+
+        with Dataset(frame["path"]) as dataset:
+            field, units = _load_3d_var_full(dataset, name, int(frame["time_index"]))
+        self.variable_3d_full_cache[key] = (field, units)
         return field, units
 
     def load_diagnostic(
@@ -915,6 +1224,8 @@ class FigureEvaluator:
                 name,
                 level_selector=source.get("level_selector"),
             )
+        if source_kind == "wrf_native_3d_full":
+            return self.load_variable_3d_full(frame, name)
         if source_kind == "wrf_diag":
             return self.load_diagnostic(frame, name)
         raise NotImplementedError(
@@ -939,9 +1250,9 @@ class FigureEvaluator:
                 f"source.kind is recognized but not implemented yet: {source_kind}"
             )
 
-        field = _ensure_2d_field(
-            self._evaluate_node(self.parsed_defs[layer_id], current_frame, source=source),
-            label=f"layer_defs.{layer_id}",
+        field = np.asarray(
+            np.ma.filled(self._evaluate_node(self.parsed_defs[layer_id], current_frame, source=source), np.nan),
+            dtype=float,
         )
         units = layer_def.get("units")
         units_value = None if units is None else str(units)
@@ -1036,11 +1347,15 @@ def run_figure_request(
     frames: list[dict[str, Any]],
     base_output_dir: Path | str,
     *,
+    view_defs: dict[str, dict[str, Any]] | None = None,
     dry_run: bool = False,
 ) -> list[dict[str, Any]]:
     ensure_plotting_dependencies()
     if not frames:
         raise ValueError("No frames selected for figure rendering")
+
+    view_spec, view_id = _resolve_figure_view(figure_spec, view_defs)
+    map_view = _is_map_view(view_spec)
 
     root_layer_ids: list[str] = []
     for render_layer in figure_spec.get("layers", []):
@@ -1049,10 +1364,14 @@ def run_figure_request(
                 root_layer_ids.append(layer_id)
     parsed_defs, _ = resolve_layer_dependencies(layer_defs, root_layer_ids)
     usage_memo: dict[str, bool] = {}
-    uses_current = any(
+    expression_uses_current = any(
         layer_uses_current(layer_id, parsed_defs, memo=usage_memo)
         for layer_id in root_layer_ids
     )
+    if _view_has_axis(view_spec, "time"):
+        uses_current = False
+    else:
+        uses_current = expression_uses_current or _view_time_selector_mode(view_spec) == "current"
 
     artifacts: list[dict[str, Any]] = []
     for _, group in _group_frames_by_domain(frames):
@@ -1061,6 +1380,8 @@ def run_figure_request(
 
         evaluator = FigureEvaluator(layer_defs, parsed_defs, group)
         output_targets = group if uses_current else [group[-1]]
+        if _view_has_axis(view_spec, "time"):
+            output_targets = [group[-1]]
         allow_exact_path = len(output_targets) == 1 and len(_group_frames_by_domain(frames)) == 1
         output_cfg = figure_spec.get("output", {})
         overwrite = bool(output_cfg.get("overwrite", False))
@@ -1068,6 +1389,8 @@ def run_figure_request(
 
         for target in output_targets:
             current_frame = target if uses_current else None
+            if _view_has_axis(view_spec, "time"):
+                current_frame = None
             title = _compose_title(
                 figure_spec,
                 group,
@@ -1094,17 +1417,32 @@ def run_figure_request(
             if not dry_run:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 figure, axis = plt.subplots(figsize=(6, 5), constrained_layout=True)
-                axis.set_xlabel("west_east")
-                axis.set_ylabel("south_north")
+                axis.set_xlabel(_axis_label(view_spec.get("x_axis")))
+                axis.set_ylabel(_axis_label(view_spec.get("y_axis")))
                 axis.set_title(title)
+
+            current_time_index: int | None = None
+            if current_frame is not None:
+                for index, candidate in enumerate(group):
+                    if int(candidate["global_index"]) == int(current_frame["global_index"]):
+                        current_time_index = index
+                        break
+                if current_time_index is None:
+                    raise ValueError("Current frame is not part of the selected frame group")
 
             for render_layer in figure_spec.get("layers", []):
                 draw = render_layer["draw"]
                 if str(draw.get("kind") or "") == "vector":
+                    if not map_view:
+                        raise ValueError(
+                            f"draw.kind=vector is currently only supported for map views: figure={figure_spec['figure_id']}"
+                        )
                     u_layer_id = str(render_layer["u_layer_id"])
                     v_layer_id = str(render_layer["v_layer_id"])
-                    u_field, u_units = evaluator.evaluate_layer(u_layer_id, target)
-                    v_field, v_units = evaluator.evaluate_layer(v_layer_id, target)
+                    u_field_raw, _ = evaluator.evaluate_layer(u_layer_id, target)
+                    v_field_raw, _ = evaluator.evaluate_layer(v_layer_id, target)
+                    u_field = _ensure_2d_field(u_field_raw, label=f"layer_defs.{u_layer_id}")
+                    v_field = _ensure_2d_field(v_field_raw, label=f"layer_defs.{v_layer_id}")
                     magnitude = np.sqrt(u_field**2 + v_field**2)
                     u_summary = _summary(u_field)
                     v_summary = _summary(v_field)
@@ -1144,7 +1482,18 @@ def run_figure_request(
                     continue
 
                 layer_id = str(render_layer["layer_id"])
-                field, units = evaluator.evaluate_layer(layer_id, target)
+                units: str | None
+                if map_view:
+                    field_raw, units = evaluator.evaluate_layer(layer_id, target)
+                    field = _ensure_2d_field(field_raw, label=f"layer_defs.{layer_id}")
+                else:
+                    stacked, dims, units = _stack_layer_over_time(evaluator, layer_id, group)
+                    field = _extract_view_field(
+                        stacked,
+                        dims,
+                        view_spec,
+                        current_time_index=current_time_index,
+                    )
                 layer_summaries[layer_id] = _summary(field)
                 resolved_layers.append(
                     {
@@ -1156,6 +1505,10 @@ def run_figure_request(
                         ),
                         "source": deepcopy(layer_defs[layer_id].get("source") or {}),
                         "units": layer_defs[layer_id].get("units"),
+                        "view_axes": {
+                            "x": _view_axis_name(view_spec.get("x_axis")),
+                            "y": _view_axis_name(view_spec.get("y_axis")),
+                        },
                         "draw": deepcopy(draw),
                     }
                 )
@@ -1169,6 +1522,8 @@ def run_figure_request(
                 selected_frames=group,
                 current_frame=current_frame,
                 title=title,
+                view=deepcopy(view_spec),
+                view_id=view_id,
                 resolved_layers=resolved_layers,
                 layer_summaries=layer_summaries,
             )
@@ -1251,6 +1606,7 @@ def main() -> int:
             normalized["layer_defs"],
             selected_frames,
             output_path.parent,
+            view_defs=normalized.get("view_defs"),
             dry_run=bool(args.dry_run),
         ),
     }

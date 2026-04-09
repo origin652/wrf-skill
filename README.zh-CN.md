@@ -56,8 +56,17 @@ cp config/wrf_env.hpc.example.json config/wrf_env.json
 
 ### Codex
 
-现在对 Codex 的推荐路径已经是 skill-first。
-先把 WRF skills 安装到 Codex，再用 `wrf-workspace-init` 在任意地方生成一个干净工作区。
+这个仓库现在已经自带了一个 repo-local 的 Codex plugin。
+如果你直接在 Codex 里打开这个仓库，它可以通过 `.agents/plugins/marketplace.json` 发现 `plugins/wrf/`，然后直接载入这些 WRF skills。
+
+插件里的 skill 文件是薄封装，真正的单一真源仍然是 `.claude/skills/`。
+
+repo-local plugin 入口：
+
+- marketplace：`.agents/plugins/marketplace.json`
+- plugin 根目录：`plugins/wrf/`
+
+如果你想把 skill 装到 `~/.codex/skills/` 里全局复用，老的安装脚本也还可以继续用：
 
 ```bash
 git clone https://github.com/origin652/wrf-skill.git
@@ -65,7 +74,7 @@ cd wrf-skill
 bash scripts/install_codex_skills.sh
 ```
 
-如果 Codex 已经开着，安装后建议新开一个窗口或新会话，让它重新加载 skill 列表。
+如果 Codex 已经开着，不管你是加了 repo plugin 还是跑了安装脚本，都建议新开一个窗口或新会话，让它重新加载 skill 列表。
 
 然后你可以直接对 Codex 说：
 
@@ -176,17 +185,19 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 ## 后处理协议
 
 `post_spec.json` 是后处理和诊断请求的建议格式。
-规范形态是 `schema_version=2`，顶层包含 `defaults`、`style_defs`、`layer_defs` 和 `figures`。
+规范形态是 `schema_version=2`，顶层包含 `defaults`、`style_defs`、可选的 `view_defs`、`layer_defs` 和 `figures`。
 
 稳定部分：
 
 - `layer_defs`：可复用的数据图层定义，例如 `t2_c`、`wind10m`、`terrain`、`accum_precip`
 - `style_defs`：可复用的渲染样式定义，例如 raster、contour、categorical_fill、vector 的公共样式
+- `view_defs`：可复用的二维视图提取定义（地图视图或轴对齐截面）
 - `figures[*].inputs`：输入文件解析方式
 - `figures[*].selectors`：时间和 domain 选择
 - `figures[*].render`：图级渲染默认值
 - `figures[*].output`：输出位置和 sidecar 行为
 - `figures[*].layers[*].style_id` 和 `figures[*].layers[*].draw`：复用样式以及单图层覆盖
+- `figures[*].view_id`（或内联 `figures[*].view`）：选择一个可复用 view
 
 `figures[*].layers[*]` 目前有两种形态：
 
@@ -198,8 +209,15 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 
 - `wrf_native_2d`：直接读取 WRF 原生二维变量
 - `wrf_native_3d`：读取 WRF 原生三维变量，并通过 `source.level_selector` 选层
+- `wrf_native_3d_full`：读取完整三维场（用于 `time x bottom_top` 这类截面）
 - `wrf_diag`：调用内置诊断量，例如 `wind_speed_10m`、`wind_dir_10m`、`total_precip`、`temp_c_2m`、`rh2`
 - `wrf_native`：仍然接受，作为 `wrf_native_2d` 的兼容别名
+
+当前截面能力（第一阶段）：
+
+- 支持的 view 轴：`time`、`bottom_top`、`south_north`、`west_east`
+- 支持的截面类型：轴对齐的 `time-x`、`time-y`、`time-height`
+- 矢量渲染（`draw.kind=vector`）目前仍限制在地图视图
 
 生成一个起始 spec：
 
@@ -213,7 +231,7 @@ python3 scripts/post_spec.py --project-name demo --output post_spec.json
 cp templates/post_spec.example.json post_spec.json
 ```
 
-这个示例里也已经带了一个矢量图示例，使用可复用的 `u10`、`v10` 标量 layer，再通过 `wind_quiver` 样式组合成风矢量。
+这个示例里也已经带了一个矢量图示例，使用可复用的 `u10`、`v10` 标量 layer，再通过 `wind_quiver` 样式组合成风矢量；同时还带了一个基于 `view_defs` 的 `time-x` 截面示例。
 
 规范化并校验已有 spec：
 
@@ -238,6 +256,9 @@ python3 scripts/plot_wrfout.py \
 ```
 
 可机读的协议文件在 `config/post_schema.json`。
+
+通用截面现在还没有实现。
+如果你想先看未来“任意两轴视图”的协议草案，可以看 `docs/post_view_protocol.zh-CN.md`。
 
 ## 怎么理解这个仓库
 

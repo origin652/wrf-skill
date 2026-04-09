@@ -20,13 +20,21 @@ SUPPORTED_SOURCE_KINDS = {
     "wrf_native",
     "wrf_native_2d",
     "wrf_native_3d",
+    "wrf_native_3d_full",
     "wrf_diag",
+}
+SUPPORTED_VIEW_AXES = {
+    "time",
+    "bottom_top",
+    "south_north",
+    "west_east",
 }
 ROOT_RESERVED_KEYS = {
     "schema_version",
     "project_name",
     "defaults",
     "style_defs",
+    "view_defs",
     "layer_defs",
     "figures",
 }
@@ -233,12 +241,21 @@ def default_figure_spec() -> dict[str, Any]:
     }
 
 
+def default_view_spec() -> dict[str, Any]:
+    return {
+        "x_axis": {"name": "west_east"},
+        "y_axis": {"name": "south_north"},
+        "selectors": {},
+    }
+
+
 def _empty_post_spec(project_name: str = "demo") -> dict[str, Any]:
     return {
         "schema_version": DEFAULT_POST_SPEC_VERSION,
         "project_name": project_name,
         "defaults": default_post_defaults(),
         "style_defs": {},
+        "view_defs": {},
         "layer_defs": {},
         "figures": [],
     }
@@ -251,6 +268,7 @@ def default_post_spec(project_name: str = "demo", *, product_name: str | None = 
         "project_name": project_name,
         "defaults": default_post_defaults(),
         "style_defs": default_style_defs(),
+        "view_defs": {},
         "layer_defs": default_layer_defs(),
         "figures": [default_figure_spec()],
     }
@@ -327,6 +345,58 @@ def _normalize_style_def(raw_style: Any) -> dict[str, Any]:
     return _normalize_draw(raw_style)
 
 
+def _normalize_view_axis(raw_axis: Any, *, fallback_name: str) -> dict[str, Any]:
+    normalized: dict[str, Any] = {
+        "name": fallback_name,
+        "label": None,
+        "units": None,
+    }
+    if isinstance(raw_axis, dict):
+        for key, value in raw_axis.items():
+            if key not in {"name", "label", "units"}:
+                normalized[key] = deepcopy(value)
+        if raw_axis.get("name") is not None:
+            normalized["name"] = raw_axis.get("name")
+        if raw_axis.get("label") is not None:
+            normalized["label"] = raw_axis.get("label")
+        if raw_axis.get("units") is not None:
+            normalized["units"] = raw_axis.get("units")
+        return normalized
+    if raw_axis is not None:
+        normalized["name"] = raw_axis
+    return normalized
+
+
+def _normalize_view_def(raw_view: Any) -> dict[str, Any]:
+    base = default_view_spec()
+    if not isinstance(raw_view, dict):
+        return base
+
+    normalized: dict[str, Any] = {
+        key: deepcopy(value)
+        for key, value in raw_view.items()
+        if key not in {"x_axis", "y_axis", "selectors"}
+    }
+    normalized["x_axis"] = _normalize_view_axis(
+        raw_view.get("x_axis"),
+        fallback_name=str(base["x_axis"]["name"]),
+    )
+    normalized["y_axis"] = _normalize_view_axis(
+        raw_view.get("y_axis"),
+        fallback_name=str(base["y_axis"]["name"]),
+    )
+
+    selectors = raw_view.get("selectors")
+    if isinstance(selectors, dict):
+        normalized["selectors"] = {
+            str(dim): deepcopy(selector)
+            for dim, selector in selectors.items()
+        }
+    else:
+        normalized["selectors"] = {}
+    return normalized
+
+
 def _normalize_render_layer(
     raw_layer: Any,
     style_defs: dict[str, dict[str, Any]],
@@ -365,6 +435,7 @@ def _normalize_figure(
 ) -> dict[str, Any]:
     base = {
         "figure_id": None,
+        "view_id": None,
         "inputs": deep_merge(default_post_defaults()["inputs"], defaults.get("inputs", {})),
         "selectors": deep_merge(
             default_post_defaults()["selectors"],
@@ -381,9 +452,11 @@ def _normalize_figure(
     normalized: dict[str, Any] = {
         key: deepcopy(value)
         for key, value in raw_figure.items()
-        if key not in {"figure_id", *DEFAULT_SECTION_KEYS, "layers"}
+        if key not in {"figure_id", "view_id", "view", *DEFAULT_SECTION_KEYS, "layers"}
     }
     normalized["figure_id"] = raw_figure.get("figure_id")
+    normalized["view_id"] = raw_figure.get("view_id")
+    normalized["view"] = _normalize_view_def(raw_figure.get("view")) if "view" in raw_figure else None
 
     for section in DEFAULT_SECTION_KEYS:
         merged = deepcopy(base[section])
@@ -432,6 +505,13 @@ def normalize_post_spec(
         normalized["style_defs"] = {
             str(style_id): _normalize_style_def(style_def)
             for style_id, style_def in raw_style_defs.items()
+        }
+
+    raw_view_defs = incoming.get("view_defs")
+    if isinstance(raw_view_defs, dict):
+        normalized["view_defs"] = {
+            str(view_id): _normalize_view_def(view_def)
+            for view_id, view_def in raw_view_defs.items()
         }
 
     raw_layer_defs = incoming.get("layer_defs")
@@ -607,6 +687,12 @@ def _validate_layer_def(layer_id: str, layer_def: Any, errors: list[str]) -> Non
         kind = source.get("kind")
         if not isinstance(kind, str) or not kind.strip():
             errors.append(f"{prefix}.source.kind must be a non-empty string")
+        elif kind == "wrf_native_3d_full":
+            level_selector = source.get("level_selector")
+            if level_selector is not None and not isinstance(level_selector, dict):
+                errors.append(
+                    f"{prefix}.source.level_selector must be an object or null for wrf_native_3d_full"
+                )
         elif kind == "wrf_native_3d":
             level_selector = source.get("level_selector")
             if not isinstance(level_selector, dict):
@@ -643,6 +729,121 @@ def _validate_style_def(style_id: str, style_def: Any, errors: list[str]) -> Non
         errors.append("style_defs keys must be non-empty strings")
         return
     _validate_draw(style_def, prefix, errors)
+
+
+def _view_axis_name(axis: Any) -> str:
+    if isinstance(axis, dict):
+        token = axis.get("name")
+        return str(token).strip() if token is not None else ""
+    if axis is None:
+        return ""
+    return str(axis).strip()
+
+
+def _is_map_view(view: dict[str, Any]) -> bool:
+    x_axis = _view_axis_name(view.get("x_axis"))
+    y_axis = _view_axis_name(view.get("y_axis"))
+    return {x_axis, y_axis} == {"west_east", "south_north"}
+
+
+def _validate_view_def(view_id: str, view_def: Any, errors: list[str], *, prefix: str | None = None) -> None:
+    item_prefix = prefix or f"view_defs.{view_id}"
+    if not isinstance(view_def, dict):
+        errors.append(f"{item_prefix} must be an object")
+        return
+
+    if view_id and not view_id.strip() and prefix is None:
+        errors.append("view_defs keys must be non-empty strings")
+
+    x_axis = view_def.get("x_axis")
+    y_axis = view_def.get("y_axis")
+    for axis_name, axis_value in (("x_axis", x_axis), ("y_axis", y_axis)):
+        axis_prefix = f"{item_prefix}.{axis_name}"
+        if not isinstance(axis_value, dict):
+            errors.append(f"{axis_prefix} must be an object")
+            continue
+        token = _view_axis_name(axis_value)
+        if not token:
+            errors.append(f"{axis_prefix}.name must be a non-empty string")
+        elif token not in SUPPORTED_VIEW_AXES:
+            errors.append(
+                f"{axis_prefix}.name must be one of {', '.join(sorted(SUPPORTED_VIEW_AXES))}"
+            )
+        for optional_key in ("label", "units"):
+            optional_value = axis_value.get(optional_key)
+            if optional_value is not None and (
+                not isinstance(optional_value, str) or not optional_value.strip()
+            ):
+                errors.append(f"{axis_prefix}.{optional_key} must be a non-empty string or null")
+
+    x_name = _view_axis_name(x_axis)
+    y_name = _view_axis_name(y_axis)
+    if x_name and y_name and x_name == y_name:
+        errors.append(f"{item_prefix}.x_axis and {item_prefix}.y_axis must target different axes")
+
+    selectors = view_def.get("selectors")
+    if selectors is None:
+        return
+    if not isinstance(selectors, dict):
+        errors.append(f"{item_prefix}.selectors must be an object")
+        return
+
+    for dim, selector in selectors.items():
+        selector_prefix = f"{item_prefix}.selectors.{dim}"
+        if dim not in SUPPORTED_VIEW_AXES:
+            errors.append(
+                f"{selector_prefix} uses unsupported dimension, expected one of {', '.join(sorted(SUPPORTED_VIEW_AXES))}"
+            )
+            continue
+        if not isinstance(selector, dict):
+            errors.append(f"{selector_prefix} must be an object")
+            continue
+        mode = selector.get("mode")
+        allowed_modes = {"index", "first", "last", "current"}
+        if mode not in allowed_modes:
+            errors.append(
+                f"{selector_prefix}.mode must be one of {', '.join(sorted(allowed_modes))}"
+            )
+            continue
+        if dim != "time" and mode == "current":
+            errors.append(f"{selector_prefix}.mode=current is only valid for time")
+        if mode == "index":
+            index = selector.get("index")
+            if not isinstance(index, int) or index < 0:
+                errors.append(f"{selector_prefix}.index must be a non-negative integer for mode=index")
+
+
+def _resolve_figure_view(
+    figure: dict[str, Any],
+    view_defs: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], str | None]:
+    inline_view = figure.get("view")
+    if isinstance(inline_view, dict):
+        return inline_view, None
+    view_id = figure.get("view_id")
+    if isinstance(view_id, str) and view_id in view_defs:
+        return view_defs[view_id], view_id
+    return default_view_spec(), None
+
+
+def _view_has_axis(view: dict[str, Any], axis_name: str) -> bool:
+    return axis_name in {
+        _view_axis_name(view.get("x_axis")),
+        _view_axis_name(view.get("y_axis")),
+    }
+
+
+def _view_time_selector_mode(view: dict[str, Any]) -> str | None:
+    selectors = view.get("selectors")
+    if not isinstance(selectors, dict):
+        return None
+    selector = selectors.get("time")
+    if not isinstance(selector, dict):
+        return None
+    mode = selector.get("mode")
+    if not isinstance(mode, str):
+        return None
+    return mode.strip().lower() or None
 
 
 def _validate_draw(draw: Any, prefix: str, errors: list[str]) -> None:
@@ -751,6 +952,16 @@ def validate_post_spec(spec: dict[str, Any]) -> list[str]:
         for style_id, style_def in style_defs.items():
             _validate_style_def(str(style_id), style_def, errors)
 
+    view_defs = spec.get("view_defs")
+    if view_defs is None:
+        view_defs = {}
+    elif not isinstance(view_defs, dict):
+        errors.append("view_defs must be an object when provided")
+        view_defs = {}
+    else:
+        for view_id, view_def in view_defs.items():
+            _validate_view_def(str(view_id), view_def, errors)
+
     layer_defs = spec.get("layer_defs")
     if not isinstance(layer_defs, dict) or not layer_defs:
         errors.append("layer_defs must be a non-empty object")
@@ -774,10 +985,31 @@ def validate_post_spec(spec: dict[str, Any]) -> list[str]:
         if not isinstance(figure_id, str) or not figure_id.strip():
             errors.append(f"{prefix}.figure_id must be a non-empty string")
 
+        view_id = figure.get("view_id")
+        if view_id is not None:
+            if not isinstance(view_id, str) or not view_id.strip():
+                errors.append(f"{prefix}.view_id must be a non-empty string or null")
+            elif view_id not in view_defs:
+                errors.append(f"{prefix}.view_id references unknown view_defs key: {view_id}")
+
+        inline_view = figure.get("view")
+        if inline_view is not None and not isinstance(inline_view, dict):
+            errors.append(f"{prefix}.view must be an object or null")
+            inline_view = None
+        if inline_view is not None and view_id is not None:
+            errors.append(f"{prefix}.view and {prefix}.view_id are mutually exclusive")
+
         _validate_inputs(figure.get("inputs"), f"{prefix}.inputs", errors)
         _validate_selectors(figure.get("selectors"), f"{prefix}.selectors", errors)
         _validate_render(figure.get("render"), f"{prefix}.render", errors)
         _validate_output(figure.get("output"), f"{prefix}.output", errors)
+
+        if isinstance(inline_view, dict):
+            _validate_view_def("", inline_view, errors, prefix=f"{prefix}.view")
+            resolved_view = inline_view
+        else:
+            resolved_view, _ = _resolve_figure_view(figure, view_defs)
+        is_map_view = _is_map_view(resolved_view)
 
         layers = figure.get("layers")
         if not isinstance(layers, list) or not layers:
@@ -799,6 +1031,10 @@ def validate_post_spec(spec: dict[str, Any]) -> list[str]:
             _validate_draw(draw, f"{layer_prefix}.draw", errors)
             draw_kind = str(draw.get("kind") or "") if isinstance(draw, dict) else ""
             if draw_kind == "vector":
+                if not is_map_view:
+                    errors.append(
+                        f"{layer_prefix} draw.kind=vector is currently only supported for map views"
+                    )
                 for component_key in ("u_layer_id", "v_layer_id"):
                     component_id = layer.get(component_key)
                     if not isinstance(component_id, str) or not component_id.strip():
@@ -897,10 +1133,12 @@ def interpret_post_spec(
             raise ValueError(f"Unknown figure_id: {figure_id}")
 
     runtime = _runtime_symbols()
+    view_defs = normalized.get("view_defs") if isinstance(normalized.get("view_defs"), dict) else {}
     layer_defs = normalized["layer_defs"]
     known_layers = set(layer_defs)
     interpreted_figures: list[dict[str, Any]] = []
     for figure in figures:
+        resolved_view, resolved_view_id = _resolve_figure_view(figure, view_defs)
         root_layer_ids: list[str] = []
         for render_layer in figure.get("layers", []):
             for layer_id in _render_layer_target_ids(render_layer):
@@ -961,10 +1199,18 @@ def interpret_post_spec(
                 )
 
         figure_uses_current = any(item["uses_current"] for item in resolved_layers)
+        if _view_has_axis(resolved_view, "time"):
+            output_mode = "frame_range"
+        elif _view_time_selector_mode(resolved_view) == "current":
+            output_mode = "per_frame"
+        else:
+            output_mode = "per_frame" if figure_uses_current else "frame_range"
         interpreted_figures.append(
             {
                 "figure_id": figure["figure_id"],
-                "output_mode": "per_frame" if figure_uses_current else "frame_range",
+                "view_id": resolved_view_id,
+                "view": deepcopy(resolved_view),
+                "output_mode": output_mode,
                 "render_layer_order": root_layer_ids,
                 "dependency_order": dependency_order,
                 "resolved_layers": resolved_layers,
@@ -979,6 +1225,7 @@ def interpret_post_spec(
         "schema_version": normalized["schema_version"],
         "project_name": normalized["project_name"],
         "style_defs": deepcopy(normalized.get("style_defs") or {}),
+        "view_defs": deepcopy(normalized.get("view_defs") or {}),
         "layer_defs": {
             layer_id: {
                 "expr": layer_def.get("expr"),

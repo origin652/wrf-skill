@@ -182,6 +182,12 @@ def build_layer_defs() -> dict[str, dict]:
             "units": "mm",
             "metadata": {"description": "Accumulated precipitation"},
         },
+        "qvapor_cube_gkg": {
+            "source": {"kind": "wrf_native_3d_full"},
+            "expr": "QVAPOR * 1000",
+            "units": "g kg-1",
+            "metadata": {"description": "Full-column water vapor mixing ratio"},
+        },
     }
 
 
@@ -726,6 +732,160 @@ class FigureRenderingTests(unittest.TestCase):
         self.assertAlmostEqual(sidecar["resolved_layers"][1]["magnitude_summary"]["mean"], 5.0)
         self.assertAlmostEqual(sidecar["layer_summaries"]["u10"]["mean"], 3.0)
         self.assertAlmostEqual(sidecar["layer_summaries"]["v10"]["mean"], 4.0)
+
+    def test_run_figure_request_supports_time_x_view(self) -> None:
+        runs_dir = make_test_dir("_test_v2_time_x_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00", "2024-07-20_01:00:00", "2024-07-20_02:00:00"],
+            t2=[
+                np.array([[300.0, 301.0, 302.0], [303.0, 304.0, 305.0]]),
+                np.array([[301.0, 302.0, 303.0], [304.0, 305.0, 306.0]]),
+                np.array([[302.0, 303.0, 304.0], [305.0, 306.0, 307.0]]),
+            ],
+            u10=[np.ones((2, 3)), np.ones((2, 3)), np.ones((2, 3))],
+            v10=[np.ones((2, 3)), np.ones((2, 3)), np.ones((2, 3))],
+            rainc=[np.zeros((2, 3)), np.zeros((2, 3)), np.zeros((2, 3))],
+            rainnc=[np.zeros((2, 3)), np.zeros((2, 3)), np.zeros((2, 3))],
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0, 1, 2]})
+        figure_spec = {
+            "figure_id": "time_x_t2",
+            "view_id": "time_x_line",
+            "render": {"format": "png", "title": "Time-X T2", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "time-x-t2",
+                "sidecar_json": True,
+                "overwrite": True,
+            },
+            "layers": [
+                {
+                    "layer_id": "t2_c",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "coolwarm", "show_colorbar": False},
+                    },
+                }
+            ],
+        }
+        view_defs = {
+            "time_x_line": {
+                "x_axis": {"name": "time"},
+                "y_axis": {"name": "west_east"},
+                "selectors": {
+                    "south_north": {"mode": "index", "index": 1},
+                },
+            }
+        }
+
+        artifacts = run_figure_request(
+            figure_spec,
+            build_layer_defs(),
+            selected_frames,
+            runs_dir,
+            view_defs=view_defs,
+            dry_run=True,
+        )
+
+        self.assertEqual(len(artifacts), 1)
+        artifact = artifacts[0]
+        self.assertIsNone(artifact["current_frame"])
+        self.assertEqual(artifact["view"]["x_axis"]["name"], "time")
+        self.assertEqual(artifact["view"]["y_axis"]["name"], "west_east")
+        self.assertAlmostEqual(artifact["layer_summaries"]["t2_c"]["mean"], 31.85, places=6)
+
+    def test_run_figure_request_supports_time_height_view_with_3d_full(self) -> None:
+        runs_dir = make_test_dir("_test_v2_time_height_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00", "2024-07-20_01:00:00"],
+            t2=[np.full((2, 2), 300.0), np.full((2, 2), 301.0)],
+            u10=[np.ones((2, 2)), np.ones((2, 2))],
+            v10=[np.ones((2, 2)), np.ones((2, 2))],
+            rainc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            extra_3d_fields={
+                "QVAPOR": (
+                    [
+                        np.array(
+                            [
+                                [[0.001, 0.002], [0.003, 0.004]],
+                                [[0.005, 0.006], [0.007, 0.008]],
+                            ]
+                        ),
+                        np.array(
+                            [
+                                [[0.002, 0.003], [0.004, 0.005]],
+                                [[0.006, 0.007], [0.008, 0.009]],
+                            ]
+                        ),
+                    ],
+                    "kg kg-1",
+                )
+            },
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0, 1]})
+        figure_spec = {
+            "figure_id": "time_height_qvapor",
+            "view_id": "time_height_point",
+            "render": {"format": "png", "title": "Time-Height QVAPOR", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "time-height-qvapor",
+                "sidecar_json": True,
+                "overwrite": True,
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": False},
+                    },
+                }
+            ],
+        }
+        view_defs = {
+            "time_height_point": {
+                "x_axis": {"name": "time"},
+                "y_axis": {"name": "bottom_top"},
+                "selectors": {
+                    "south_north": {"mode": "index", "index": 0},
+                    "west_east": {"mode": "index", "index": 1},
+                },
+            }
+        }
+
+        artifacts = run_figure_request(
+            figure_spec,
+            build_layer_defs(),
+            selected_frames,
+            runs_dir,
+            view_defs=view_defs,
+            dry_run=True,
+        )
+
+        self.assertEqual(len(artifacts), 1)
+        artifact = artifacts[0]
+        self.assertIsNone(artifact["current_frame"])
+        self.assertEqual(artifact["view"]["x_axis"]["name"], "time")
+        self.assertEqual(artifact["view"]["y_axis"]["name"], "bottom_top")
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 4.5, places=6)
 
 
 class WrfPostProjectTests(unittest.TestCase):

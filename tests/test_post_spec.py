@@ -32,6 +32,7 @@ class PostSpecTests(unittest.TestCase):
         self.assertEqual(payload["defaults"]["render"]["format"], "png")
         self.assertIn("temperature_raster", payload["style_defs"])
         self.assertIn("wind_quiver", payload["style_defs"])
+        self.assertEqual(payload["view_defs"], {})
         self.assertIn("t2_c", payload["layer_defs"])
         self.assertIn("terrain", payload["layer_defs"])
         self.assertIn("u10", payload["layer_defs"])
@@ -197,6 +198,49 @@ class PostSpecTests(unittest.TestCase):
 
         self.assertTrue(any(".v_layer_id must be a non-empty string" in error for error in errors))
 
+    def test_validate_rejects_vector_layer_in_non_map_view(self) -> None:
+        payload = normalize_post_spec(
+            {
+                "project_name": "case-vector-section",
+                "view_defs": {
+                    "time_x": {
+                        "x_axis": {"name": "time"},
+                        "y_axis": {"name": "west_east"},
+                        "selectors": {
+                            "south_north": {"mode": "index", "index": 0},
+                        },
+                    }
+                },
+                "style_defs": {
+                    "wind_quiver": {
+                        "kind": "vector",
+                        "style": {"mode": "quiver", "stride": 2},
+                    }
+                },
+                "layer_defs": {
+                    "u10": {"expr": "U10", "units": "m s-1"},
+                    "v10": {"expr": "V10", "units": "m s-1"},
+                },
+                "figures": [
+                    {
+                        "figure_id": "fig-1",
+                        "view_id": "time_x",
+                        "layers": [
+                            {
+                                "u_layer_id": "u10",
+                                "v_layer_id": "v10",
+                                "style_id": "wind_quiver",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        errors = validate_post_spec(payload)
+
+        self.assertTrue(any("only supported for map views" in error for error in errors))
+
     def test_validate_rejects_wrf_native_3d_without_level_selector(self) -> None:
         payload = normalize_post_spec(
             {
@@ -348,6 +392,48 @@ class PostSpecTests(unittest.TestCase):
         self.assertEqual(resolved["draw"]["kind"], "vector")
         self.assertEqual(resolved["draw"]["style"]["mode"], "quiver")
         self.assertTrue(resolved["uses_current"])
+
+    def test_interpret_time_axis_view_uses_frame_range_output_mode(self) -> None:
+        payload = interpret_post_spec(
+            {
+                "project_name": "case-time-axis",
+                "view_defs": {
+                    "time_x": {
+                        "x_axis": {"name": "time"},
+                        "y_axis": {"name": "west_east"},
+                        "selectors": {
+                            "south_north": {"mode": "index", "index": 0},
+                        },
+                    }
+                },
+                "style_defs": {
+                    "temp_style": {
+                        "kind": "raster",
+                        "style": {"colormap": "viridis", "show_colorbar": False},
+                    }
+                },
+                "layer_defs": {
+                    "t2_c": {"expr": "T2 - 273.15", "units": "C"},
+                },
+                "figures": [
+                    {
+                        "figure_id": "time-x",
+                        "view_id": "time_x",
+                        "layers": [
+                            {
+                                "layer_id": "t2_c",
+                                "style_id": "temp_style",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        figure = payload["figures"][0]
+        self.assertEqual(figure["output_mode"], "frame_range")
+        self.assertEqual(figure["view"]["x_axis"]["name"], "time")
+        self.assertEqual(figure["view"]["y_axis"]["name"], "west_east")
 
     def test_cli_interpret_outputs_execution_plan(self) -> None:
         runs_dir = make_test_dir("_test_post_spec_interpret_cli")

@@ -1,0 +1,44 @@
+{
+  "name": "wrf",
+  "version": "0.1.0",
+  "description": "Expose the WRF workflow skills in this repository as a repo-local Codex plugin.",
+  "author": {
+    "name": "origin652",
+    "url": "https://github.com/origin652"
+  },
+  "homepage": "https://github.com/origin652/wrf-skill",
+  "repository": "https://github.com/origin652/wrf-skill",
+  "license": "MIT",
+  "keywords": [
+    "wrf",
+    "wps",
+    "weather",
+    "simulation",
+    "postprocessing",
+    "hpc"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "WRF",
+    "shortDescription": "Operate the repo WRF workflow through Codex",
+    "longDescription": "Repo-local Codex plugin that exposes the existing WRF workflow skills in this workspace, including project init, config, data, WPS, run, status, and post-processing.",
+    "developerName": "origin652",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/origin652/wrf-skill",
+    "privacyPolicyURL": "https://github.com/origin652/wrf-skill",
+    "termsOfServiceURL": "https://github.com/origin652/wrf-skill",
+    "defaultPrompt": [
+      "Initialize or configure a WRF project in this workspace",
+      "Run wrf-data, wrf-wps, or wrf-run for an existing project",
+      "Post-process wrfout files with layer-based figures"
+    ],
+    "composerIcon": "./assets/wrf.svg",
+    "logo": "./assets/wrf.svg",
+    "screenshots": [],
+    "brandColor": "#1F4B99"
+  }
+}

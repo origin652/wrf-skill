@@ -202,6 +202,7 @@ def run_postprocess(
                 spec["layer_defs"],
                 selected_frames,
                 output_dir,
+                view_defs=spec.get("view_defs"),
                 dry_run=dry_run,
             )
             for artifact in artifacts:

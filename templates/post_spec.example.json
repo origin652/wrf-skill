@@ -112,6 +112,24 @@
       }
     }
   },
+  "view_defs": {
+    "time_x_line_y50": {
+      "x_axis": {
+        "name": "time",
+        "label": "time_index"
+      },
+      "y_axis": {
+        "name": "west_east",
+        "label": "west_east"
+      },
+      "selectors": {
+        "south_north": {
+          "mode": "index",
+          "index": 50
+        }
+      }
+    }
+  },
   "layer_defs": {
     "terrain": {
       "source": {
@@ -317,6 +335,29 @@
         {
           "layer_id": "terrain",
           "style_id": "terrain_contours"
+        }
+      ]
+    },
+    {
+      "figure_id": "time_x_temperature_section",
+      "view_id": "time_x_line_y50",
+      "selectors": {
+        "time_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "render": {
+        "title": "Time-X Temperature Section"
+      },
+      "output": {
+        "file_stem": "time-x-temperature-section"
+      },
+      "layers": [
+        {
+          "layer_id": "t2_c",
+          "style_id": "temperature_raster"
         }
       ]
     },

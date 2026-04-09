@@ -24,6 +24,12 @@
         "$ref": "#/$defs/draw"
       }
     },
+    "view_defs": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/view_def"
+      }
+    },
     "layer_defs": {
       "type": "object",
       "minProperties": 1,
@@ -321,6 +327,80 @@
         },
         "metadata": {
           "type": "object"
+        }
+      },
+      "additionalProperties": true
+    },
+    "view_axis": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": [
+            "time",
+            "bottom_top",
+            "south_north",
+            "west_east"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "units": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "view_selector": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "current",
+            "first",
+            "last",
+            "index"
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "view_def": {
+      "type": "object",
+      "required": [
+        "x_axis",
+        "y_axis"
+      ],
+      "properties": {
+        "x_axis": {
+          "$ref": "#/$defs/view_axis"
+        },
+        "y_axis": {
+          "$ref": "#/$defs/view_axis"
+        },
+        "selectors": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/view_selector"
+          }
         }
       },
       "additionalProperties": true
@@ -637,6 +717,16 @@
         "figure_id": {
           "type": "string",
           "minLength": 1
+        },
+        "view_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "view": {
+          "$ref": "#/$defs/view_def"
         },
         "inputs": {
           "$ref": "#/$defs/inputs"

@@ -56,8 +56,17 @@ Then open this repository in Claude Code.
 
 ### Codex
 
-For Codex, the recommended path is skill-based.
-Install the WRF skills into Codex, then use `wrf-workspace-init` to create a clean working workspace anywhere.
+For Codex, this repository now ships a repo-local plugin entry as well as the older skill installer.
+If you open this repository directly in Codex, it can discover the bundled plugin from `.agents/plugins/marketplace.json` and load the WRF skills from `plugins/wrf/`.
+
+The plugin skill files are thin wrappers, and `.claude/skills/` remains the canonical instruction source.
+
+Repo-local plugin path:
+
+- marketplace: `.agents/plugins/marketplace.json`
+- plugin root: `plugins/wrf/`
+
+If you want home-global installation instead of a repo-local plugin, the older skill installer still works:
 
 ```bash
 git clone https://github.com/origin652/wrf-skill.git
@@ -65,7 +74,7 @@ cd wrf-skill
 bash scripts/install_codex_skills.sh
 ```
 
-If Codex is already open, start a new window or new session after installation so it reloads the skill list.
+If Codex is already open, start a new window or new session after adding the repo plugin or installing skills so it reloads the skill list.
 
 Then ask Codex to create a workspace, for example:
 
@@ -175,17 +184,19 @@ If you only want preprocessing first, stop after `wrf-wps`.
 ## Post-processing Protocol
 
 `post_spec.json` is the intended request format for post-processing and diagnostics.
-The canonical shape is `schema_version=2` with top-level `defaults`, `style_defs`, `layer_defs`, and `figures`.
+The canonical shape is `schema_version=2` with top-level `defaults`, `style_defs`, optional `view_defs`, `layer_defs`, and `figures`.
 
 Stable sections:
 
 - `layer_defs` for reusable computed data layers such as `t2_c`, `wind10m`, `terrain`, and `accum_precip`
 - `style_defs` for reusable draw presets such as raster, contour, categorical, and vector styling
+- `view_defs` for reusable 2-axis view extraction (map or axis-aligned sections)
 - `figures[*].inputs` for file resolution
 - `figures[*].selectors` for domain and time selection
 - `figures[*].render` for figure-level rendering defaults
 - `figures[*].output` for output location and sidecar behavior
 - `figures[*].layers[*].style_id` and `figures[*].layers[*].draw` for reusable styles plus per-layer overrides
+- `figures[*].view_id` (or inline `figures[*].view`) for selecting a reusable view
 
 Render-layer shapes:
 
@@ -197,8 +208,15 @@ Current `layer_defs[*].source.kind` modes:
 
 - `wrf_native_2d` for direct 2D WRF variables
 - `wrf_native_3d` for 3D WRF variables with `source.level_selector`
+- `wrf_native_3d_full` for full 3D fields (used by section views such as `time x bottom_top`)
 - `wrf_diag` for built-in diagnostics such as `wind_speed_10m`, `wind_dir_10m`, `total_precip`, `temp_c_2m`, and `rh2`
 - `wrf_native` is still accepted as an alias of `wrf_native_2d`
+
+Current section-view scope (phase 1):
+
+- supported view axes: `time`, `bottom_top`, `south_north`, `west_east`
+- supported section types: axis-aligned `time-x`, `time-y`, and `time-height`
+- vector draw (`draw.kind=vector`) is currently limited to map views
 
 Generate a starter spec:
 
@@ -212,7 +230,7 @@ If you want a fuller v2 example with reusable layers, a per-frame figure, and a 
 cp templates/post_spec.example.json post_spec.json
 ```
 
-That example also includes a vector figure using reusable scalar `u10` and `v10` layers plus a `wind_quiver` style preset.
+That example also includes a vector figure using reusable scalar `u10` and `v10` layers plus a `wind_quiver` style preset, and a `time-x` section figure powered by `view_defs`.
 
 Normalize and validate an existing spec:
 
@@ -237,6 +255,9 @@ python3 scripts/plot_wrfout.py \
 ```
 
 The machine-readable contract lives in `config/post_schema.json`.
+
+Generalized cross-sections are not implemented yet.
+A protocol draft for future arbitrary 2-axis views lives in `docs/post_view_protocol.md`.
 
 ## Scope
 

@@ -1,0 +1,20 @@
+{
+  "name": "local-wrf-workspace",
+  "interface": {
+    "displayName": "Local WRF Workspace Plugins"
+  },
+  "plugins": [
+    {
+      "name": "wrf",
+      "source": {
+        "source": "local",
+        "path": "./plugins/wrf"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Coding"
+    }
+  ]
+}
