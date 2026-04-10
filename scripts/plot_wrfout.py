@@ -3098,7 +3098,7 @@ def run_figure_request(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Render a single figure from a v2 WRF post-processing spec."
+        description="Render a single figure from a v3 WRF post-processing spec."
     )
     parser.add_argument("--wrfout", nargs="+", required=True)
     parser.add_argument("--figure-id", required=True)

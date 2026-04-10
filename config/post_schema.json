@@ -9,7 +9,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 2
+      "const": 3
     },
     "project_name": {
       "type": "string",

@@ -2697,7 +2697,7 @@ class WrfPostProjectTests(unittest.TestCase):
         post_spec_path.write_text(
             json.dumps(
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "project_name": "demo",
                     "style_defs": build_style_defs(),
                     "layer_defs": build_layer_defs(),
@@ -2749,8 +2749,8 @@ class WrfPostProjectTests(unittest.TestCase):
             sidecar = load_json(Path(artifact["sidecar_path"]))
             self.assertEqual(sidecar["resolved_layers"][0]["style_id"], "temperature_raster")
 
-    def test_run_postprocess_real_project_v2_smoke(self) -> None:
-        runs_dir = make_test_dir("_test_wrf_post_real_v2_smoke")
+    def test_run_postprocess_real_project_v3_smoke(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_post_real_v3_smoke")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
 
         real_state = load_json(REAL_PROJECT_JSON)
@@ -2764,21 +2764,21 @@ class WrfPostProjectTests(unittest.TestCase):
         post_spec_path.write_text(
             json.dumps(
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "project_name": "real-smoke",
                     "style_defs": build_style_defs(),
                     "layer_defs": build_layer_defs(),
                     "figures": [
                         {
-                            "figure_id": "real_v2_smoke",
+                            "figure_id": "real_v3_smoke",
                             "selectors": {
                                 "domain": "d01",
                                 "time_indices": [0, 6],
                             },
-                            "render": {"title": "Real V2 Smoke", "dpi": 120},
+                            "render": {"title": "Real V3 Smoke", "dpi": 120},
                             "output": {
                                 "subdir": "plots",
-                                "file_stem": "real-v2-smoke",
+                                "file_stem": "real-v3-smoke",
                                 "sidecar_json": True,
                                 "overwrite": True,
                             },
@@ -2818,7 +2818,7 @@ class WrfPostProjectTests(unittest.TestCase):
         self.assertTrue(sidecar_path.exists())
 
         sidecar = load_json(sidecar_path)
-        self.assertEqual(sidecar["figure_id"], "real_v2_smoke")
+        self.assertEqual(sidecar["figure_id"], "real_v3_smoke")
         self.assertIsNone(sidecar["current_frame"])
         self.assertEqual(len(sidecar["selected_frames"]), 2)
         self.assertEqual(
@@ -2833,7 +2833,7 @@ class WrfPostProjectTests(unittest.TestCase):
         self.assertTrue(log_path.exists())
         log_text = log_path.read_text(encoding="utf-8")
         self.assertIn("wrf-post project=real-smoke", log_text)
-        self.assertIn("[figure 1] id=real_v2_smoke", log_text)
+        self.assertIn("[figure 1] id=real_v3_smoke", log_text)
         self.assertIn(f"output={artifact['path']}", log_text)
 
 

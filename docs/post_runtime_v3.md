@@ -1,19 +1,19 @@
-# Current WRF Post-Processing v2 Guide
+# Current WRF Post-Processing v3 Guide
 
 Status date: 2026-04-10
 
-This document describes the current runnable `schema_version=2` post-processing behavior in this repository.
+This document describes the current runnable `schema_version=3` post-processing behavior in this repository.
 It is the companion to:
 
 - `config/post_schema.json` for the machine-readable contract
 - `templates/post_spec.example.json` for a fuller starter spec
-- `docs/post_view_protocol.md` for future arbitrary 2-axis view design
+- `docs/post_view_protocol.md` for design notes and future extensions beyond the current validated scope
 
-Phase 6 conclusion in this repository: the runnable contract remains `schema_version=2` for now; `schema_version=3` is still only a future draft.
+Phase 6 conclusion in this repository: the currently validated runtime contract is now published as `schema_version=3`.
 
 ## What Is Stable Today
 
-The current v2 runtime supports these building blocks:
+The current v3 runtime supports these building blocks:
 
 - reusable `layer_defs`
 - reusable `style_defs`
@@ -278,11 +278,11 @@ Path-section vector overlay:
 
 ## What Is Still Future Work
 
-These are still outside the current v2 scope:
+These are still outside the current v3 scope:
 
 - arbitrary 2-axis combinations beyond the validated view shapes above
 - section-vector support outside explicit path-section axis_projection
 - path sections with `time` as a plotted axis
 - more general sampling models beyond `sampling.path.kind=polyline`
 
-The runnable contract remains `schema_version=2`. For the future design beyond that scope, see `docs/post_view_protocol.md` and `docs/post_view_roadmap.md`.
+The runnable contract now uses `schema_version=3`. For future extensions beyond the validated scope above, see `docs/post_view_protocol.md` and `docs/post_view_roadmap.md`.

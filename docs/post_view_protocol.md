@@ -1,13 +1,13 @@
-# Generalized Post-Processing View Protocol Draft
+# Generalized Post-Processing View Protocol Notes
 
-Status: proposal only. This document does not describe the current runnable `schema_version=2` contract.
+Status: design notes and future extensions. This document is not the exact machine-readable contract for the current runnable `schema_version=3` schema.
 
-Phase 6 conclusion for this repository: keep the runnable contract on `schema_version=2` for now. `schema_version=3` is not being published yet, so this file remains a future-facing design draft.
+Phase 6 conclusion for this repository: the currently validated runtime contract is now published as `schema_version=3`.
 
-Some ideas from this draft have already landed in the v2 runtime, including `view_defs`, `time-x`, `time-y`, `time-height`, `time-pressure`, richer selector modes, `distance_km` path sections, and explicit path-section vector projection.
-This file still describes the future direction beyond the current validated v2 scope, especially arbitrary 2-axis combinations and section-vector behavior.
+Some ideas from these notes are now part of the published v3 runtime, including `view_defs`, `time-x`, `time-y`, `time-height`, `time-pressure`, richer selector modes, `distance_km` path sections, and explicit path-section vector projection.
+This file still describes design rationale and future direction beyond the current validated v3 scope, especially arbitrary 2-axis combinations and more generalized section-vector behavior.
 
-For the current runnable behavior, see `docs/post_runtime_v2.md`.
+For the current runnable behavior, see `docs/post_runtime_v3.md`.
 
 ## Goal
 
@@ -279,8 +279,8 @@ Renderers would stay 2D.
 
 ## Recommended implementation order
 
-1. Introduce internal n-D field metadata without changing the external `schema_version=2` contract.
-2. Add `view_defs` and `figure.view_id` in a draft `schema_version=3`.
+1. Introduce internal n-D field metadata without changing the external contract.
+2. Publish the validated `view_defs` and `figure.view_id` model as `schema_version=3`.
 3. Implement only axis-aligned views first:
    - map `x/y`
    - `time/height`

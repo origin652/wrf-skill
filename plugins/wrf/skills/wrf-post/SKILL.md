@@ -12,6 +12,7 @@ This plugin skill is a thin wrapper that exposes the canonical workspace skill a
 1. Open `.claude/skills/wrf-post/SKILL.md` first and use it as the canonical workflow.
 2. Use repo-root `scripts/post_spec.py`, `scripts/wrf_post.py`, and `scripts/plot_wrfout.py`.
 3. Treat `post_spec.json`, `runs/<project>/output/plots/`, and `project.json.artifacts.plots` as the persisted post-processing state.
+4. The published post-processing contract now uses `schema_version=3`; use the canonical workspace skill and `docs/post_runtime_v3.md` for exact scope.
 
 ## Files
 

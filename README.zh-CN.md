@@ -185,8 +185,8 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 ## 后处理协议
 
 `post_spec.json` 是后处理和诊断请求的建议格式。
-规范形态是 `schema_version=2`，顶层包含 `defaults`、`style_defs`、可选的 `view_defs`、`layer_defs` 和 `figures`。
-当前对外发布的正式合同仍保持在 `schema_version=2`；`schema_version=3` 继续只作为未来协议草案存在。
+规范形态现在是 `schema_version=3`，顶层包含 `defaults`、`style_defs`、可选的 `view_defs`、`layer_defs` 和 `figures`。
+当前对外发布的正式合同现在已经切到 `schema_version=3`。
 
 稳定部分：
 
@@ -226,7 +226,7 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 - `view.selectors` 当前支持：`index`、`nearest_index`、`value`、`nearest_value`、`first`、`last`、`current`、`mean`、`min`、`max`、`sum`
 - 矢量渲染（`draw.kind=vector`）现在支持地图视图，以及带显式 `draw.style.axis_projection` 的路径视图
 
-当前可直接运行的 v2 行为、示例和边界，见 `docs/post_runtime_v2.zh-CN.md`。
+当前可直接运行的 v3 行为、示例和边界，见 `docs/post_runtime_v3.zh-CN.md`。
 
 生成一个起始 spec：
 
@@ -234,7 +234,7 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 python3 scripts/post_spec.py --project-name demo --output post_spec.json
 ```
 
-如果你想直接从一个更完整的 v2 示例开始，里面已经包含可复用 layer、逐时 figure 和范围图 figure，可以直接：
+如果你想直接从一个更完整的 v3 示例开始，里面已经包含可复用 layer、逐时 figure 和范围图 figure，可以直接：
 
 ```bash
 cp templates/post_spec.example.json post_spec.json
@@ -274,7 +274,7 @@ python3 scripts/plot_wrfout.py \
 可机读的协议文件在 `config/post_schema.json`。
 
 当前截面支持是收敛过的，但已经包含 `time-x`、`time-y`、`time-height`、`time-pressure`、selector reduce、`distance_km` 路径剖面，以及显式的路径截面矢量投影。
-当前可运行合同仍是 `schema_version=2`；如果你想看超出这些范围的未来“任意两轴视图”协议草案，可以看 `docs/post_view_protocol.zh-CN.md`。
+当前可运行合同现在使用 `schema_version=3`；如果你想看超出这些范围的后续扩展设计说明，可以看 `docs/post_view_protocol.zh-CN.md`。
 
 ## 怎么理解这个仓库
 

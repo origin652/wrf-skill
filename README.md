@@ -184,8 +184,8 @@ If you only want preprocessing first, stop after `wrf-wps`.
 ## Post-processing Protocol
 
 `post_spec.json` is the intended request format for post-processing and diagnostics.
-The canonical shape is `schema_version=2` with top-level `defaults`, `style_defs`, optional `view_defs`, `layer_defs`, and `figures`.
-The current published contract stays on `schema_version=2`; `schema_version=3` remains a future protocol draft.
+The canonical shape is `schema_version=3` with top-level `defaults`, `style_defs`, optional `view_defs`, `layer_defs`, and `figures`.
+The current published contract now uses `schema_version=3`.
 
 Stable sections:
 
@@ -225,7 +225,7 @@ Current view scope:
 - selector modes in `view.selectors`: `index`, `nearest_index`, `value`, `nearest_value`, `first`, `last`, `current`, `mean`, `min`, `max`, and `sum`
 - vector draw (`draw.kind=vector`) supports map views and path views with explicit `draw.style.axis_projection`
 
-For the current runnable v2 behavior, examples, and boundaries, see `docs/post_runtime_v2.md`.
+For the current runnable v3 behavior, examples, and boundaries, see `docs/post_runtime_v3.md`.
 
 Generate a starter spec:
 
@@ -233,7 +233,7 @@ Generate a starter spec:
 python3 scripts/post_spec.py --project-name demo --output post_spec.json
 ```
 
-If you want a fuller v2 example with reusable layers, a per-frame figure, and a range-only figure, start from:
+If you want a fuller v3 example with reusable layers, a per-frame figure, and a range-only figure, start from:
 
 ```bash
 cp templates/post_spec.example.json post_spec.json
@@ -273,7 +273,7 @@ python3 scripts/plot_wrfout.py \
 The machine-readable contract lives in `config/post_schema.json`.
 
 Current section support is intentionally scoped, but it already includes `time-x`, `time-y`, `time-height`, `time-pressure`, selector reductions, `distance_km` path sections, and explicit path-section vector projection.
-The runnable contract remains `schema_version=2`; a protocol draft for future arbitrary 2-axis views beyond that scope lives in `docs/post_view_protocol.md`.
+The runnable contract now uses `schema_version=3`; design notes for future arbitrary 2-axis extensions beyond that scope live in `docs/post_view_protocol.md`.
 
 ## Scope
 

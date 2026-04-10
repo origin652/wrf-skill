@@ -1,13 +1,13 @@
-# 通用后处理视图协议草案
+# 通用后处理视图设计说明
 
-状态：提案阶段。这里描述的不是当前可直接运行的 `schema_version=2` 协议。
+状态：设计说明和后续扩展方向。这里不是当前可运行 `schema_version=3` 的精确机读合同。
 
-这个仓库当前阶段 6 的结论是：继续把可运行合同维持在 `schema_version=2`，暂时不发布 `schema_version=3`。所以这份文件仍然只是未来方向的设计草案。
+这个仓库当前阶段 6 的结论是：当前已验证的 runtime 合同已经正式发布为 `schema_version=3`。
 
-这份草案里的部分想法已经落进了当前 v2 runtime，例如 `view_defs`、`time-x`、`time-y`、`time-height`、`time-pressure`、更丰富的 selectors、`distance_km` 路径剖面，以及显式的路径截面矢量投影。
-这篇文档现在描述的仍然是超出当前 v2 校验范围之后的未来方向，尤其是更通用的任意两轴组合和截面矢量行为。
+这份设计说明里的部分想法已经落进了当前发布的 v3 runtime，例如 `view_defs`、`time-x`、`time-y`、`time-height`、`time-pressure`、更丰富的 selectors、`distance_km` 路径剖面，以及显式的路径截面矢量投影。
+这篇文档现在描述的仍然是超出当前已验证 v3 范围之后的设计思路，尤其是更通用的任意两轴组合和更广义的截面矢量行为。
 
-当前可直接运行的行为见 `docs/post_runtime_v2.zh-CN.md`。
+当前可直接运行的行为见 `docs/post_runtime_v3.zh-CN.md`。
 
 ## 目标
 
@@ -279,8 +279,8 @@ FieldCube
 
 ## 推荐实施顺序
 
-1. 先在内部引入 n 维 field 元数据，不改变现有 `schema_version=2`
-2. 再定义带 `view_defs` 和 `figure.view_id` 的草案 `schema_version=3`
+1. 先在内部引入 n 维 field 元数据
+2. 把已验证的 `view_defs` 和 `figure.view_id` 模型正式发布为 `schema_version=3`
 3. 第一阶段只实现轴对齐视图：
    - 地图 `x/y`
    - `time/height`

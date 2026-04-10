@@ -24,10 +24,10 @@ def make_test_dir(name: str) -> Path:
 
 
 class PostSpecTests(unittest.TestCase):
-    def test_default_post_spec_uses_v2_layers_shape(self) -> None:
+    def test_default_post_spec_uses_v3_layers_shape(self) -> None:
         payload = default_post_spec("demo")
 
-        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
         self.assertEqual(payload["project_name"], "demo")
         self.assertEqual(payload["defaults"]["render"]["format"], "png")
         self.assertIn("temperature_raster", payload["style_defs"])
@@ -1025,7 +1025,7 @@ class PostSpecTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(output_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
         self.assertEqual(payload["figures"][0]["render"]["dpi"], 240)
         self.assertEqual(payload["figures"][0]["layers"][0]["layer_id"], "wind10m")
 

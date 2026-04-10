@@ -2,7 +2,7 @@
 
 Status date: 2026-04-10
 
-This document tracks the next implementation steps for `wrf-post` as the runtime evolves beyond the current `schema_version=2` behavior.
+This document tracks the next implementation steps for `wrf-post` as the runtime evolves beyond the current `schema_version=3` behavior.
 It is not the protocol draft itself. The design draft remains in [post_view_protocol.md](/mnt/c/Users/dell/Documents/sepcific_skill/docs/post_view_protocol.md).
 
 ## Current State
@@ -157,13 +157,13 @@ Tasks:
 
 Decision:
 
-- Keep the current runnable contract on `schema_version=2`
-- Leave `schema_version=3` as a future design draft until the runtime grows beyond the current validated v2 scope
+- Publish the current validated contract as `schema_version=3`
+- Treat further arbitrary 2-axis expansion as work beyond the currently validated v3 scope
 
 Done when:
 
-- The template, README, and v2 guide all point to the same runnable `schema_version=2` contract
-- The protocol draft clearly stays future-facing
+- The template, README, and v3 guide all point to the same runnable `schema_version=3` contract
+- The protocol notes clearly distinguish current v3 behavior from future extensions
 
 ## Recommended Order
 

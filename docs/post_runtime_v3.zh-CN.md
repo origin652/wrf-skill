@@ -1,19 +1,19 @@
-# 当前 WRF 后处理 v2 指南
+# 当前 WRF 后处理 v3 指南
 
 状态日期：2026-04-10
 
-这篇文档描述的是这个仓库里当前可直接运行的 `schema_version=2` 后处理行为。
+这篇文档描述的是这个仓库里当前可直接运行的 `schema_version=3` 后处理行为。
 它和下面几份文件配套：
 
 - `config/post_schema.json`：可机读协议
 - `templates/post_spec.example.json`：更完整的起始示例
-- `docs/post_view_protocol.zh-CN.md`：未来“任意两轴视图”的设计草案
+- `docs/post_view_protocol.zh-CN.md`：当前设计说明和超出已验证范围之后的后续扩展方向
 
-这个仓库目前对阶段 6 的结论是：当前可运行合同仍保持在 `schema_version=2`；`schema_version=3` 还只是未来草案。
+这个仓库在阶段 6 的结论是：当前已验证的 runtime 合同现在正式发布为 `schema_version=3`。
 
 ## 现在稳定可用的部分
 
-当前 v2 runtime 已经稳定支持这些结构：
+当前 v3 runtime 已经稳定支持这些结构：
 
 - 可复用的 `layer_defs`
 - 可复用的 `style_defs`
@@ -278,11 +278,11 @@ python3 scripts/wrf_post.py --project-name demo --post-spec runs/demo/post_spec.
 
 ## 仍然属于后续工作
 
-这些目前还不在 v2 的稳定范围里：
+这些目前还不在 v3 的稳定范围里：
 
 - 超出上面校验范围的任意两轴组合
 - 超出显式路径截面 axis_projection 之外的更通用截面矢量
 - 把 `time` 作为路径剖面的绘图轴
 - 超出 `sampling.path.kind=polyline` 的更通用采样模型
 
-当前可运行合同仍是 `schema_version=2`。超出这个范围的后续设计见 `docs/post_view_protocol.zh-CN.md` 和 `docs/post_view_roadmap.zh-CN.md`。
+当前可运行合同现在使用 `schema_version=3`。超出上面已验证范围的后续设计见 `docs/post_view_protocol.zh-CN.md` 和 `docs/post_view_roadmap.zh-CN.md`。

@@ -13,7 +13,7 @@ try:
 except ImportError:  # pragma: no cover
     from .spec_utils import TIME_FORMAT, deep_merge
 
-DEFAULT_POST_SPEC_VERSION = 2
+DEFAULT_POST_SPEC_VERSION = 3
 ALLOWED_INPUT_MODES = {"project_artifacts", "explicit_paths", "glob"}
 DEFAULT_SECTION_KEYS = ("inputs", "selectors", "render", "output")
 SUPPORTED_SOURCE_KINDS = {

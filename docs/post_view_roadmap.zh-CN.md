@@ -2,7 +2,7 @@
 
 状态日期：2026-04-10
 
-这个文档记录 `wrf-post` 从当前 `schema_version=2` 运行时继续演进到更通用视图层的后续计划。
+这个文档记录 `wrf-post` 从当前 `schema_version=3` 运行时继续演进到更通用视图层的后续计划。
 它不是协议草案本身，协议设计仍以 [post_view_protocol.zh-CN.md](/mnt/c/Users/dell/Documents/sepcific_skill/docs/post_view_protocol.zh-CN.md) 为准。
 
 ## 当前状态
@@ -157,13 +157,13 @@
 
 结论：
 
-- 当前可运行合同继续保持在 `schema_version=2`
-- `schema_version=3` 继续保留为未来设计草案，等 runtime 真正超出当前 v2 已验证范围之后再推进
+- 当前已验证合同正式发布为 `schema_version=3`
+- 更进一步的任意两轴扩展，作为超出当前已验证 v3 范围之后的后续工作继续推进
 
 完成标准：
 
-- 模板、README 和 v2 指南都指向同一套可运行的 `schema_version=2` 合同
-- 协议草案明确保持 future-facing
+- 模板、README 和 v3 指南都指向同一套可运行的 `schema_version=3` 合同
+- 设计说明明确区分当前 v3 行为和后续扩展
 
 ## 建议执行顺序
 
