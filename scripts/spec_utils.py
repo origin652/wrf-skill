@@ -7,6 +7,11 @@ from typing import Any
 TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
 DEFAULT_SPEC_VERSION = 2
 ALLOWED_DATA_SOURCES = {"gfs", "era5", "fnl"}
+DATA_SOURCE_DEFAULT_INTERVAL_SECONDS = {
+    "gfs": 10800,
+    "era5": 10800,
+    "fnl": 21600,
+}
 ALLOWED_RUN_MODES = {"local", "hpc"}
 BASE_PHYSICS_KEYS = (
     "mp_physics",
@@ -29,6 +34,11 @@ DEFAULT_SECTION_KEYS = (
 
 def parse_time(value: str) -> datetime:
     return datetime.strptime(value, TIME_FORMAT)
+
+
+def default_forcing_interval_seconds(source: str) -> int:
+    normalized = str(source).lower()
+    return int(DATA_SOURCE_DEFAULT_INTERVAL_SECONDS.get(normalized, DATA_SOURCE_DEFAULT_INTERVAL_SECONDS["gfs"]))
 
 
 def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -67,7 +77,7 @@ def default_spec(project_name: str = "demo") -> dict[str, Any]:
         "timing": {
             "start_time": "2024-07-20_00:00:00",
             "end_time": "2024-07-20_06:00:00",
-            "forcing_interval_seconds": 10800,
+            "forcing_interval_seconds": default_forcing_interval_seconds("gfs"),
             "history_interval_minutes": 60,
             "frames_per_outfile": 1,
             "restart": False,
@@ -88,7 +98,7 @@ def default_spec(project_name: str = "demo") -> dict[str, Any]:
         "wps": {
             "share": {
                 "wrf_core": "ARW",
-                "interval_seconds": 10800,
+                "interval_seconds": default_forcing_interval_seconds("gfs"),
                 "io_form_geogrid": 2,
             },
             "geogrid": {

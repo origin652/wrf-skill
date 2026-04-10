@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from datetime import datetime, timedelta
+from http import client as http_client
 from pathlib import Path
 import time
 from typing import Any, Callable
@@ -117,6 +118,37 @@ def _summarize_results(results: list[dict[str, Any] | None], total_requests: int
     }
 
 
+def _stream_response_to_path(response: Any, target_path: Path, *, mode: str) -> None:
+    with target_path.open(mode) as handle:
+        while True:
+            chunk = response.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            handle.write(chunk)
+
+
+def _response_status(response: Any) -> int | None:
+    status = getattr(response, "status", None)
+    if status is not None:
+        return int(status)
+    getcode = getattr(response, "getcode", None)
+    if callable(getcode):
+        return getcode()
+    return None
+
+
+def _response_header(response: Any, name: str) -> str | None:
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        value = headers.get(name)
+        if value is not None:
+            return value
+    getheader = getattr(response, "getheader", None)
+    if callable(getheader):
+        return getheader(name)
+    return None
+
+
 def _download_one(
     request_item: dict[str, Any],
     data_dir: Path,
@@ -143,17 +175,28 @@ def _download_one(
         return record
 
     temp_path = local_path.with_suffix(local_path.suffix + ".part")
+    if overwrite and temp_path.exists():
+        temp_path.unlink()
     last_error = ""
     for attempt in range(retries + 1):
         try:
-            if temp_path.exists():
-                temp_path.unlink()
-            with urllib_request.urlopen(request_item["url"], timeout=timeout) as response, temp_path.open("wb") as handle:
-                while True:
-                    chunk = response.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
+            resume_from = temp_path.stat().st_size if temp_path.exists() else 0
+            request = urllib_request.Request(request_item["url"])
+            if resume_from > 0:
+                request.add_header("Range", f"bytes={resume_from}-")
+
+            with urllib_request.urlopen(request, timeout=timeout) as response:
+                status = _response_status(response)
+                content_range = _response_header(response, "Content-Range")
+                supports_resume = status == 206 or (
+                    content_range is not None and content_range.startswith(f"bytes {resume_from}-")
+                )
+                if resume_from > 0 and not supports_resume:
+                    temp_path.unlink()
+                    with urllib_request.urlopen(request_item["url"], timeout=timeout) as full_response:
+                        _stream_response_to_path(full_response, temp_path, mode="wb")
+                else:
+                    _stream_response_to_path(response, temp_path, mode="ab" if resume_from > 0 else "wb")
 
             downloaded_size = temp_path.stat().st_size if temp_path.exists() else 0
             if downloaded_size <= 0:
@@ -171,10 +214,14 @@ def _download_one(
                 }
             )
             return record
-        except (OSError, ValueError, urllib_error.URLError, urllib_error.HTTPError) as exc:
+        except (
+            OSError,
+            ValueError,
+            http_client.IncompleteRead,
+            urllib_error.URLError,
+            urllib_error.HTTPError,
+        ) as exc:
             last_error = str(exc)
-            if temp_path.exists():
-                temp_path.unlink()
             if attempt < retries:
                 time.sleep(_backoff_seconds(attempt))
 

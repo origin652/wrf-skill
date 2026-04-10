@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from scripts.download_era5 import build_manifest as build_era5_manifest
+from scripts.download_fnl import build_manifest as build_fnl_manifest
 from scripts.local_runtime import LocalRuntimeConfigError
 from scripts.download_gfs import build_manifest as build_gfs_manifest
 from scripts.wrf_config import configure_project
@@ -27,6 +28,13 @@ def make_test_dir(name: str) -> Path:
 
 
 def create_gfs_source_tree(source_root: Path, manifest: dict) -> None:
+    for request in manifest["requests"]:
+        target = source_root / request["remote_path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"{request['file_name']}\n", encoding="utf-8")
+
+
+def create_fnl_source_tree(source_root: Path, manifest: dict) -> None:
     for request in manifest["requests"]:
         target = source_root / request["remote_path"]
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -133,6 +141,14 @@ class WrfWpsTests(unittest.TestCase):
                 base_url=source_root.as_uri(),
             )
             create_era5_source_tree(source_root, manifest)
+        elif data_source == "fnl":
+            manifest = build_fnl_manifest(
+                start="2024-07-20_00:00:00",
+                end="2024-07-20_01:00:00",
+                interval_hours=6,
+                base_url=source_root.as_uri(),
+            )
+            create_fnl_source_tree(source_root, manifest)
         else:
             manifest = build_gfs_manifest(
                 start="2024-07-20_00:00:00",
@@ -211,6 +227,21 @@ class WrfWpsTests(unittest.TestCase):
         wps_dir = runs_dir / "demo" / "wps"
         self.assertEqual(payload["project"]["status"], "wps_ready")
         self.assertEqual((wps_dir / "Vtable").read_text(encoding="utf-8"), "ecmwf\n")
+
+    def test_prepare_wps_uses_fnl_vtable_when_requested(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_wps_fnl_vtable")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_data_ready_project(runs_dir, data_source="fnl")
+
+        fake_wps_root = runs_dir / "_fake_wps_fnl"
+        build_fake_wps_root(fake_wps_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.fnl.json", wps_dir=fake_wps_root)
+
+        payload = prepare_wps("demo", runs_dir=runs_dir, config_path=config_copy, dry_run=False)
+
+        wps_dir = runs_dir / "demo" / "wps"
+        self.assertEqual(payload["project"]["status"], "wps_ready")
+        self.assertEqual((wps_dir / "Vtable").read_text(encoding="utf-8"), "gfs\n")
 
     def test_prepare_wps_supports_custom_safe_runtime(self) -> None:
         runs_dir = make_test_dir("_test_wrf_wps_custom_safe")

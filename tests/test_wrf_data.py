@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from scripts.download_era5 import build_manifest as build_era5_manifest
+from scripts.download_fnl import build_manifest as build_fnl_manifest
 from scripts.download_gfs import build_manifest as build_gfs_manifest
 from scripts.wrf_config import configure_project
 from scripts.wrf_data import prepare_data
@@ -24,6 +25,13 @@ def make_test_dir(name: str) -> Path:
 
 
 def create_gfs_source_tree(source_root: Path, manifest: dict) -> None:
+    for request in manifest["requests"]:
+        target = source_root / request["remote_path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"{request['file_name']}\n", encoding="utf-8")
+
+
+def create_fnl_source_tree(source_root: Path, manifest: dict) -> None:
     for request in manifest["requests"]:
         target = source_root / request["remote_path"]
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -199,6 +207,27 @@ class WrfDataTests(unittest.TestCase):
         self.assertFalse((runs_dir / "demo" / "data" / "data_manifest.json").exists())
         self.assertEqual(before, project_json.read_text(encoding="utf-8"))
 
+    def test_prepare_data_supports_fnl_dry_run(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_data_fnl_dry_run")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_and_configure_project(runs_dir, data_source="fnl")
+
+        payload = prepare_data("demo", runs_dir=runs_dir, dry_run=True)
+
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["manifest"]["source"], "fnl")
+        self.assertEqual(payload["manifest"]["interval_hours"], 6)
+        self.assertEqual(payload["project"]["data_source"]["interval_hours"], 6)
+        self.assertEqual(len(payload["manifest"]["requests"]), 3)
+        self.assertEqual(
+            [item["file_name"] for item in payload["manifest"]["requests"]],
+            [
+                "gdas1.fnl0p25.2024072000.f00.grib2",
+                "gdas1.fnl0p25.2024072006.f00.grib2",
+                "gdas1.fnl0p25.2024072012.f00.grib2",
+            ],
+        )
+
     def test_prepare_data_uses_spec_forcing_interval_by_default(self) -> None:
         runs_dir = make_test_dir("_test_wrf_data_spec_interval")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
@@ -313,6 +342,48 @@ class WrfDataTests(unittest.TestCase):
         self.assertTrue((project_root / "data" / "era5.pressure.20240720.grib").exists())
         self.assertTrue((project_root / "data" / "era5.single.20240720.grib").exists())
 
+    def test_prepare_data_downloads_fnl_from_local_mirror(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_data_fnl_real")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_and_configure_project(runs_dir, data_source="fnl")
+
+        source_root = runs_dir / "_fnl_source"
+        source_root.mkdir(parents=True, exist_ok=True)
+        manifest = build_fnl_manifest(
+            start="2024-07-20_00:00:00",
+            end="2024-07-20_12:00:00",
+            interval_hours=6,
+            base_url=source_root.as_uri(),
+        )
+        create_fnl_source_tree(source_root, manifest)
+
+        payload = prepare_data(
+            "demo",
+            runs_dir=runs_dir,
+            base_url=source_root.as_uri(),
+            max_workers=1,
+            dry_run=False,
+        )
+
+        project_root = runs_dir / "demo"
+        manifest_path = project_root / "data" / "data_manifest.json"
+        download_script = project_root / "data" / "download_fnl.sh"
+        state = json.loads((project_root / "project.json").read_text(encoding="utf-8"))
+        written_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(manifest_path.exists())
+        self.assertTrue(download_script.exists())
+        self.assertEqual(payload["project"]["status"], "data_ready")
+        self.assertEqual(payload["download"]["failed_count"], 0)
+        self.assertEqual(written_manifest["source"], "fnl")
+        self.assertEqual(written_manifest["base_url"], source_root.as_uri())
+        self.assertTrue(str(payload["download_script"]).endswith("download_fnl.sh"))
+        self.assertEqual(state["status"], "data_ready")
+        self.assertEqual(len(written_manifest["requests"]), 3)
+        self.assertTrue((project_root / "data" / "gdas1.fnl0p25.2024072000.f00.grib2").exists())
+        self.assertTrue((project_root / "data" / "gdas1.fnl0p25.2024072006.f00.grib2").exists())
+        self.assertTrue((project_root / "data" / "gdas1.fnl0p25.2024072012.f00.grib2").exists())
+
     def test_unsupported_data_source_raises(self) -> None:
         runs_dir = make_test_dir("_test_wrf_data_source")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
@@ -320,7 +391,7 @@ class WrfDataTests(unittest.TestCase):
 
         spec_path = runs_dir / "demo" / "simulation_spec.json"
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
-        spec["data_source"] = "fnl"
+        spec["data_source"] = "bad_source"
         spec_path.write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
 
         with self.assertRaises(NotImplementedError):

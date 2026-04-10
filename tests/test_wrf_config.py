@@ -141,6 +141,54 @@ class WrfConfigTests(unittest.TestCase):
         self.assertEqual(namelist_wps["ungrib"]["prefix"], "ERA5")
         self.assertEqual(namelist_wps["metgrid"]["fg_name"], "ERA5")
 
+    def test_configure_project_sets_fnl_interval_and_wps_prefix(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_config_fnl_prefix")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_project(runs_dir)
+
+        configure_project(
+            "demo",
+            runs_dir=runs_dir,
+            config_path=CONFIG_PATH,
+            domains_config=DOMAINS_CONFIG,
+            physics_config=PHYSICS_CONFIG,
+            domain_presets=["east_china"],
+            physics_preset="tropical_cyclone",
+            start_time="2024-07-20_00:00:00",
+            end_time="2024-07-20_12:00:00",
+            data_source="fnl",
+            dry_run=False,
+        )
+
+        spec = json.loads((runs_dir / "demo" / "simulation_spec.json").read_text(encoding="utf-8"))
+        namelist_wps = read_namelist(runs_dir / "demo" / "wps" / "namelist.wps")
+        self.assertEqual(spec["data_source"], "fnl")
+        self.assertEqual(spec["timing"]["forcing_interval_seconds"], 21600)
+        self.assertEqual(spec["wps"]["share"]["interval_seconds"], 21600)
+        self.assertEqual(namelist_wps["share"]["interval_seconds"], 21600)
+        self.assertEqual(namelist_wps["ungrib"]["prefix"], "FNL")
+        self.assertEqual(namelist_wps["metgrid"]["fg_name"], "FNL")
+
+    def test_configure_project_rejects_fnl_start_time_off_cycle(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_config_fnl_bad_start")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_project(runs_dir)
+
+        with self.assertRaises(ValueError):
+            configure_project(
+                "demo",
+                runs_dir=runs_dir,
+                config_path=CONFIG_PATH,
+                domains_config=DOMAINS_CONFIG,
+                physics_config=PHYSICS_CONFIG,
+                domain_presets=["east_china"],
+                physics_preset="tropical_cyclone",
+                start_time="2024-07-20_03:00:00",
+                end_time="2024-07-20_12:00:00",
+                data_source="fnl",
+                dry_run=True,
+            )
+
     def test_unknown_preset_raises_error(self) -> None:
         runs_dir = make_test_dir("_test_wrf_config_bad_preset")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))

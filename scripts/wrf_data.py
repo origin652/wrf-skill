@@ -11,6 +11,10 @@ try:
         build_manifest as build_era5_manifest,
         download_manifest as download_era5_manifest,
     )
+    from download_fnl import (
+        build_manifest as build_fnl_manifest,
+        download_manifest as download_fnl_manifest,
+    )
     from download_gfs import (
         build_manifest as build_gfs_manifest,
         download_manifest as download_gfs_manifest,
@@ -29,6 +33,10 @@ except ImportError:  # pragma: no cover
     from .download_era5 import (
         build_manifest as build_era5_manifest,
         download_manifest as download_era5_manifest,
+    )
+    from .download_fnl import (
+        build_manifest as build_fnl_manifest,
+        download_manifest as download_fnl_manifest,
     )
     from .download_gfs import (
         build_manifest as build_gfs_manifest,
@@ -51,6 +59,11 @@ DOWNLOAD_HANDLERS = {
         "build_manifest": build_gfs_manifest,
         "download_manifest": download_gfs_manifest,
         "script_name": "download_gfs.sh",
+    },
+    "fnl": {
+        "build_manifest": build_fnl_manifest,
+        "download_manifest": download_fnl_manifest,
+        "script_name": "download_fnl.sh",
     },
     "era5": {
         "build_manifest": build_era5_manifest,
@@ -317,10 +330,13 @@ def write_download_script(manifest: dict[str, Any], script_path: Path) -> None:
     overwrite_required = any(item.get("replacement_reason") for item in manifest["requests"])
     if not missing_requests:
         lines.append(f'echo "All planned {source.upper()} files are already present."')
-    elif source == "gfs":
+    elif source in {"gfs", "fnl"}:
         for request in missing_requests:
             lines.append(
-                f'curl -fL "{request["url"]}" -o "{request["local_path"]}"'
+                f'curl -fL -C - "{request["url"]}" -o "{request["local_path"]}.part"'
+            )
+            lines.append(
+                f'mv "{request["local_path"]}.part" "{request["local_path"]}"'
             )
     elif source == "era5":
         downloader_path = Path(__file__).resolve().parent / "download_era5.py"

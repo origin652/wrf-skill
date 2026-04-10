@@ -15,6 +15,9 @@ This repository gives the agent a reusable WRF workflow:
 - inspect logs and status
 - support local and optional HPC workflows
 
+Built-in forcing handlers currently cover `gfs`, `fnl`, and `era5`.
+Other forcing products still require custom integration.
+
 This repository does not:
 
 - compile WRF or WPS for you

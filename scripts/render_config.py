@@ -11,6 +11,7 @@ try:
         ALLOWED_DATA_SOURCES,
         ALLOWED_RUN_MODES,
         BASE_PHYSICS_KEYS,
+        default_forcing_interval_seconds,
         deep_merge,
         normalize_spec,
         parse_time,
@@ -21,6 +22,7 @@ except ImportError:  # pragma: no cover
         ALLOWED_DATA_SOURCES,
         ALLOWED_RUN_MODES,
         BASE_PHYSICS_KEYS,
+        default_forcing_interval_seconds,
         deep_merge,
         normalize_spec,
         parse_time,
@@ -148,6 +150,15 @@ def validate_spec(spec: dict[str, Any]) -> list[str]:
         errors.append(
             f"Unsupported run_mode: {normalized['execution']['run_mode']} (expected one of {sorted(ALLOWED_RUN_MODES)})"
         )
+
+    source = str(normalized["data_source"]).lower()
+    interval_seconds = int(normalized["timing"]["forcing_interval_seconds"])
+    if source == "fnl":
+        fnl_step_seconds = default_forcing_interval_seconds("fnl")
+        if interval_seconds % fnl_step_seconds != 0:
+            errors.append("FNL forcing_interval_seconds must be a whole multiple of 21600 seconds (6 hours)")
+        if start_time.minute != 0 or start_time.second != 0 or start_time.hour % 6 != 0:
+            errors.append("FNL start_time must align to 00/06/12/18 UTC analyses")
 
     domains = normalized.get("domains", [])
     if not domains:

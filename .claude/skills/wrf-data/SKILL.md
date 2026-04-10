@@ -1,6 +1,6 @@
 ---
 name: wrf-data
-description: Prepare forcing data for a WRF project through the async task layer, with support for GFS planning, manifest generation, project state updates, and reuse of local file mirrors or already-present data.
+description: Prepare forcing data for a WRF project through the async task layer, with support for GFS, FNL, and ERA5 planning, manifest generation, project state updates, and reuse of local file mirrors or already-present data.
 ---
 
 # WRF Data
@@ -48,7 +48,9 @@ python3 scripts/wrf_task.py logs --project-name demo --lines 80
 
 ## Notes
 
-- In the current scaffold, support only `gfs`.
+- Built-in forcing handlers currently support `gfs`, `fnl`, and `era5`.
+- `gfs` and `fnl` use direct URL/file-mirror downloads; `era5` supports CDS and local mirror flows.
+- `fnl` expects 6-hour analysis spacing and start times aligned to `00/06/12/18` UTC.
 - Non-`dry-run` execution downloads or copies files automatically, writes `data_manifest.json`, inventories local GRIB files, and also writes a download shell script for retry/debugging.
 - Existing local files that already match the planned manifest are reused.
 - During async execution, `runs/<project>/logs/wrf-data.log` is updated incrementally with per-file progress lines, and `status` surfaces the latest progress line through `active_task.last_progress`.
@@ -61,4 +63,6 @@ python3 scripts/wrf_task.py logs --project-name demo --lines 80
 - `scripts/wrf_task.py`
 - `scripts/wrf_data.py`
 - `scripts/download_gfs.py`
+- `scripts/download_fnl.py`
+- `scripts/download_era5.py`
 - `runs/<project>/project.json`

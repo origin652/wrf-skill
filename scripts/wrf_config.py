@@ -21,7 +21,7 @@ try:
         save_project,
     )
     from render_config import render_from_spec, validate_spec, write_rendered_targets
-    from spec_utils import deep_merge, normalize_spec
+    from spec_utils import deep_merge, default_forcing_interval_seconds, normalize_spec
 except ImportError:  # pragma: no cover
     from .hpc.admission import evaluate_admission
     from .hpc.base import resolve_access_mode
@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover
         save_project,
     )
     from .render_config import render_from_spec, validate_spec, write_rendered_targets
-    from .spec_utils import deep_merge, normalize_spec
+    from .spec_utils import deep_merge, default_forcing_interval_seconds, normalize_spec
 
 TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
 MULTI_DOMAIN_NAMELIST_KEYS = {
@@ -63,6 +63,20 @@ TEXT_TO_MODE = {
     "cluster": "hpc",
     "集群": "hpc",
 }
+
+
+def sync_interval_defaults_for_source(spec: dict[str, Any], previous_source: str, next_source: str) -> None:
+    previous_default = default_forcing_interval_seconds(previous_source)
+    next_default = default_forcing_interval_seconds(next_source)
+
+    timing = spec.setdefault("timing", {})
+    wps = spec.setdefault("wps", {})
+    share = wps.setdefault("share", {})
+
+    if int(timing.get("forcing_interval_seconds") or previous_default) == previous_default:
+        timing["forcing_interval_seconds"] = next_default
+    if int(share.get("interval_seconds") or previous_default) == previous_default:
+        share["interval_seconds"] = next_default
 
 
 def load_json(path: Path | str) -> dict[str, Any]:
@@ -409,13 +423,16 @@ def apply_inputs_to_spec(
     if end_time:
         spec["timing"]["end_time"] = end_time
     if data_source:
-        previous_source = str(spec["data_source"]).upper()
-        next_source = str(data_source).upper()
-        if str(spec["wps"]["ungrib"].get("prefix") or "").upper() == previous_source:
-            spec["wps"]["ungrib"]["prefix"] = next_source
-        if str(spec["wps"]["metgrid"].get("fg_name") or "").upper() == previous_source:
-            spec["wps"]["metgrid"]["fg_name"] = next_source
-        spec["data_source"] = data_source
+        previous_source = str(spec["data_source"]).lower()
+        next_source = str(data_source).lower()
+        previous_source_label = previous_source.upper()
+        next_source_label = next_source.upper()
+        if str(spec["wps"]["ungrib"].get("prefix") or "").upper() == previous_source_label:
+            spec["wps"]["ungrib"]["prefix"] = next_source_label
+        if str(spec["wps"]["metgrid"].get("fg_name") or "").upper() == previous_source_label:
+            spec["wps"]["metgrid"]["fg_name"] = next_source_label
+        spec["data_source"] = next_source
+        sync_interval_defaults_for_source(spec, previous_source, next_source)
     if run_mode:
         spec["execution"]["run_mode"] = run_mode
     if spec_fragment:

@@ -1,6 +1,6 @@
 ---
 name: wrf-data
-description: Prepare forcing data for a WRF project through the async task layer, with support for GFS planning, manifest generation, project state updates, and reuse of local file mirrors or already-present data.
+description: Prepare forcing data for a WRF project through the async task layer, with support for GFS, FNL, and ERA5 planning, manifest generation, project state updates, and reuse of local file mirrors or already-present data.
 ---
 
 # WRF Data
@@ -19,3 +19,5 @@ This plugin skill is a thin wrapper that exposes the canonical workspace skill a
 - `scripts/wrf_task.py`
 - `scripts/wrf_data.py`
 - `scripts/download_gfs.py`
+- `scripts/download_fnl.py`
+- `scripts/download_era5.py`
