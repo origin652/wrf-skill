@@ -15,6 +15,8 @@ from scripts.plot_wrfout import (
     LayerResolutionError,
     NameNode,
     NumberNode,
+    _build_field_cube,
+    _reduce_cube_for_view,
     enumerate_wrfout_frames,
     layer_uses_current,
     parse_formula,
@@ -82,6 +84,7 @@ def write_wrfout_netcdf(
     extra_2d_fields: dict[str, tuple[list[np.ndarray], str | None]] | None = None,
     extra_3d_fields: dict[str, tuple[list[np.ndarray], str | None]] | None = None,
     extra_stag_3d_fields: dict[str, tuple[list[np.ndarray], str | None]] | None = None,
+    extra_dim_3d_fields: dict[str, tuple[list[np.ndarray], tuple[str, str, str], str | None]] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     sample = np.asarray(t2[0], dtype=float)
@@ -92,6 +95,7 @@ def write_wrfout_netcdf(
     field_2d_defs = extra_2d_fields or {}
     field_3d_defs = extra_3d_fields or {}
     field_stag_3d_defs = extra_stag_3d_fields or {}
+    field_dim_3d_defs = extra_dim_3d_fields or {}
 
     with Dataset(path, "w", format="NETCDF4") as dataset:
         dataset.createDimension("Time", len(times))
@@ -120,6 +124,26 @@ def write_wrfout_netcdf(
                 elif stag_level_count != int(shape[0]):
                     raise ValueError("extra_stag_3d_fields must share the same vertical level count")
             dataset.createDimension("bottom_top_stag", int(stag_level_count or 0))
+        if field_dim_3d_defs:
+            dim_sizes: dict[str, int] = {}
+            for values, dims, _ in field_dim_3d_defs.values():
+                shape = np.asarray(values[0], dtype=float).shape
+                if len(dims) != 3:
+                    raise ValueError("extra_dim_3d_fields dims must have length 3")
+                if len(shape) != 3:
+                    raise ValueError("extra_dim_3d_fields values must have shape (d0, d1, d2)")
+                for dim_name, size in zip(dims, shape):
+                    existing_size = dim_sizes.get(dim_name)
+                    if existing_size is None:
+                        dim_sizes[dim_name] = int(size)
+                    elif existing_size != int(size):
+                        raise ValueError("extra_dim_3d_fields dimensions must use consistent sizes")
+            for dim_name, size in dim_sizes.items():
+                existing_dim = dataset.dimensions.get(dim_name)
+                if existing_dim is None:
+                    dataset.createDimension(dim_name, size)
+                elif len(existing_dim) != size:
+                    raise ValueError(f"Dimension {dim_name} expected size {size}, found {len(existing_dim)}")
         _write_times(dataset, times)
 
         def write_field(name: str, values: list[np.ndarray], units: str) -> None:
@@ -161,6 +185,21 @@ def write_wrfout_netcdf(
                 variable.units = units
             variable[:, :, :, :] = np.stack(values, axis=0)
 
+        def write_field_3d_dims(
+            name: str,
+            values: list[np.ndarray],
+            dims: tuple[str, str, str],
+            units: str | None,
+        ) -> None:
+            variable = dataset.createVariable(
+                name,
+                "f4",
+                ("Time", *dims),
+            )
+            if units is not None:
+                variable.units = units
+            variable[:, :, :, :] = np.stack(values, axis=0)
+
         write_field("T2", t2, "K")
         write_field("U10", u10, "m s-1")
         write_field("V10", v10, "m s-1")
@@ -174,6 +213,8 @@ def write_wrfout_netcdf(
             write_field_3d(field_name, values, units)
         for field_name, (values, units) in field_stag_3d_defs.items():
             write_field_3d_stag(field_name, values, units)
+        for field_name, (values, dims, units) in field_dim_3d_defs.items():
+            write_field_3d_dims(field_name, values, dims, units)
         write_static_field("HGT", terrain, "m")
         write_static_field("LANDMASK", mask, None)
 
@@ -362,6 +403,107 @@ class FormulaRuntimeTests(unittest.TestCase):
 
         with self.assertRaises(LayerResolutionError):
             resolve_layer_dependencies(layer_defs, ["a"])
+
+    def test_reduce_cube_for_view_supports_richer_selector_modes(self) -> None:
+        cube = _build_field_cube(
+            np.array(
+                [
+                    [[1.0, 2.0], [3.0, 4.0]],
+                    [[5.0, 6.0], [7.0, 8.0]],
+                ],
+                dtype=float,
+            ),
+            dims=("bottom_top", "south_north", "west_east"),
+            units="g kg-1",
+            coords={
+                "bottom_top": np.array([0.0, 10.0], dtype=float),
+                "south_north": np.array([0.0, 1.0], dtype=float),
+                "west_east": np.array([0.0, 1.0], dtype=float),
+            },
+            metadata={},
+            label="selector_test_cube",
+        )
+
+        nearest_index_cube, nearest_index_selected = _reduce_cube_for_view(
+            cube,
+            keep_dims={"bottom_top", "west_east"},
+            selectors={"south_north": {"mode": "nearest_index", "index": 0.8}},
+            current_time_index=None,
+        )
+        np.testing.assert_allclose(
+            nearest_index_cube.values,
+            np.array([[3.0, 4.0], [7.0, 8.0]], dtype=float),
+        )
+        self.assertEqual(nearest_index_selected, {"south_north": 1})
+
+        value_cube, value_selected = _reduce_cube_for_view(
+            cube,
+            keep_dims={"south_north", "west_east"},
+            selectors={"bottom_top": {"mode": "value", "value": 10.0}},
+            current_time_index=None,
+        )
+        np.testing.assert_allclose(
+            value_cube.values,
+            np.array([[5.0, 6.0], [7.0, 8.0]], dtype=float),
+        )
+        self.assertEqual(value_selected, {"bottom_top": 1})
+
+        nearest_value_cube, nearest_value_selected = _reduce_cube_for_view(
+            cube,
+            keep_dims={"south_north", "west_east"},
+            selectors={"bottom_top": {"mode": "nearest_value", "value": 8.9}},
+            current_time_index=None,
+        )
+        np.testing.assert_allclose(
+            nearest_value_cube.values,
+            np.array([[5.0, 6.0], [7.0, 8.0]], dtype=float),
+        )
+        self.assertEqual(nearest_value_selected, {"bottom_top": 1})
+
+        mean_cube, mean_selected = _reduce_cube_for_view(
+            cube,
+            keep_dims={"bottom_top", "west_east"},
+            selectors={"south_north": {"mode": "mean"}},
+            current_time_index=None,
+        )
+        np.testing.assert_allclose(
+            mean_cube.values,
+            np.array([[2.0, 3.0], [6.0, 7.0]], dtype=float),
+        )
+        self.assertEqual(mean_selected, {})
+
+        min_cube, _ = _reduce_cube_for_view(
+            cube,
+            keep_dims={"bottom_top", "west_east"},
+            selectors={"south_north": {"mode": "min"}},
+            current_time_index=None,
+        )
+        np.testing.assert_allclose(
+            min_cube.values,
+            np.array([[1.0, 2.0], [5.0, 6.0]], dtype=float),
+        )
+
+        max_cube, _ = _reduce_cube_for_view(
+            cube,
+            keep_dims={"bottom_top", "west_east"},
+            selectors={"south_north": {"mode": "max"}},
+            current_time_index=None,
+        )
+        np.testing.assert_allclose(
+            max_cube.values,
+            np.array([[3.0, 4.0], [7.0, 8.0]], dtype=float),
+        )
+
+        sum_cube, _ = _reduce_cube_for_view(
+            cube,
+            keep_dims={"bottom_top", "west_east"},
+            selectors={"south_north": {"mode": "sum"}},
+            current_time_index=None,
+        )
+        np.testing.assert_allclose(
+            sum_cube.values,
+            np.array([[4.0, 6.0], [12.0, 14.0]], dtype=float),
+        )
 
 
 class FigureRenderingTests(unittest.TestCase):
@@ -779,6 +921,340 @@ class FigureRenderingTests(unittest.TestCase):
         self.assertAlmostEqual(sidecar["layer_summaries"]["u10"]["mean"], 3.0)
         self.assertAlmostEqual(sidecar["layer_summaries"]["v10"]["mean"], 4.0)
 
+    def test_run_figure_request_supports_path_section_vector_axis_projection(self) -> None:
+        runs_dir = make_test_dir("_test_v2_path_section_vectors")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        lat = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0],
+            ],
+            dtype=float,
+        )
+        lon = np.array(
+            [
+                [0.0, 1.0, 2.0],
+                [0.0, 1.0, 2.0],
+            ],
+            dtype=float,
+        )
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00"],
+            t2=[np.full((2, 3), 300.0)],
+            u10=[np.full((2, 3), 3.0)],
+            v10=[np.full((2, 3), 4.0)],
+            rainc=[np.zeros((2, 3))],
+            rainnc=[np.zeros((2, 3))],
+            lat=lat,
+            lon=lon,
+            extra_3d_fields={
+                "U_PATH": ([np.full((2, 2, 3), 3.0)], "m s-1"),
+                "V_PATH": ([np.full((2, 2, 3), 4.0)], "m s-1"),
+                "W_PATH": ([np.full((2, 2, 3), 2.0)], "m s-1"),
+            },
+        )
+
+        layer_defs = {
+            "u_path": {
+                "source": {"kind": "wrf_native_3d_full"},
+                "expr": "U_PATH",
+                "units": "m s-1",
+                "metadata": {"description": "Path-section eastward wind"},
+            },
+            "v_path": {
+                "source": {"kind": "wrf_native_3d_full"},
+                "expr": "V_PATH",
+                "units": "m s-1",
+                "metadata": {"description": "Path-section northward wind"},
+            },
+            "w_path": {
+                "source": {"kind": "wrf_native_3d_full"},
+                "expr": "W_PATH",
+                "units": "m s-1",
+                "metadata": {"description": "Path-section vertical velocity"},
+            },
+        }
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0]})
+        output_path = runs_dir / "path-section-vectors.png"
+        figure_spec = {
+            "figure_id": "path_section_vectors",
+            "view": {
+                "x_axis": {"kind": "path_coord", "name": "distance_km"},
+                "y_axis": {"name": "bottom_top"},
+                "selectors": {"time": {"mode": "current"}},
+                "sampling": {
+                    "path": {
+                        "kind": "polyline",
+                        "points": [
+                            {"lat": 0.5, "lon": 0.0},
+                            {"lat": 0.5, "lon": 2.0},
+                        ],
+                        "samples": 5,
+                    }
+                },
+            },
+            "render": {"format": "png", "title": "Path Section Vectors", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "path-section-vectors",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "u_layer_id": "u_path",
+                    "v_layer_id": "v_path",
+                    "vertical_layer_id": "w_path",
+                    "draw": {
+                        "kind": "vector",
+                        "alpha": 0.9,
+                        "zorder": 20,
+                        "style": {
+                            "mode": "quiver",
+                            "stride": 1,
+                            "scale": 25,
+                            "color": "black",
+                            "pivot": "mid",
+                            "axis_projection": {
+                                "kind": "path_section",
+                                "x_component": "path_tangent",
+                                "y_component": "vertical",
+                            },
+                        },
+                    },
+                },
+                {
+                    "u_layer_id": "u_path",
+                    "v_layer_id": "v_path",
+                    "vertical_layer_id": "w_path",
+                    "draw": {
+                        "kind": "vector",
+                        "alpha": 0.75,
+                        "zorder": 30,
+                        "style": {
+                            "mode": "quiver",
+                            "stride": 1,
+                            "scale": 25,
+                            "color": "red",
+                            "pivot": "mid",
+                            "axis_projection": {
+                                "kind": "path_section",
+                                "x_component": "path_normal",
+                                "y_component": "vertical",
+                            },
+                        },
+                    },
+                },
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                layer_defs,
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertTrue(Path(artifact["path"]).exists())
+        self.assertTrue(Path(artifact["sidecar_path"]).exists())
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["name"], "distance_km")
+        self.assertEqual(sidecar["view"]["y_axis"]["name"], "bottom_top")
+        self.assertEqual(len(sidecar["resolved_layers"]), 2)
+        tangent_layer = sidecar["resolved_layers"][0]
+        normal_layer = sidecar["resolved_layers"][1]
+        self.assertEqual(tangent_layer["axis_projection"]["x_component"], "path_tangent")
+        self.assertEqual(tangent_layer["axis_projection"]["y_component"], "vertical")
+        self.assertEqual(tangent_layer["vertical_layer_id"], "w_path")
+        self.assertAlmostEqual(tangent_layer["u_summary"]["mean"], 3.0)
+        self.assertAlmostEqual(tangent_layer["v_summary"]["mean"], 4.0)
+        self.assertAlmostEqual(tangent_layer["vertical_summary"]["mean"], 2.0)
+        self.assertAlmostEqual(tangent_layer["x_component_summary"]["mean"], 3.0)
+        self.assertAlmostEqual(tangent_layer["y_component_summary"]["mean"], 2.0)
+        self.assertAlmostEqual(tangent_layer["magnitude_summary"]["mean"], np.sqrt(13.0))
+        self.assertEqual(normal_layer["axis_projection"]["x_component"], "path_normal")
+        self.assertEqual(normal_layer["axis_projection"]["y_component"], "vertical")
+        self.assertAlmostEqual(normal_layer["x_component_summary"]["mean"], 4.0)
+        self.assertAlmostEqual(normal_layer["y_component_summary"]["mean"], 2.0)
+        self.assertAlmostEqual(sidecar["layer_summaries"]["u_path"]["mean"], 3.0)
+        self.assertAlmostEqual(sidecar["layer_summaries"]["v_path"]["mean"], 4.0)
+        self.assertAlmostEqual(sidecar["layer_summaries"]["w_path"]["mean"], 2.0)
+
+    def test_run_figure_request_destaggers_real_like_path_section_vectors(self) -> None:
+        runs_dir = make_test_dir("_test_v2_path_section_vectors_destaggered")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        lat = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0],
+            ],
+            dtype=float,
+        )
+        lon = np.array(
+            [
+                [0.0, 1.0, 2.0],
+                [0.0, 1.0, 2.0],
+            ],
+            dtype=float,
+        )
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00"],
+            t2=[np.full((2, 3), 300.0)],
+            u10=[np.full((2, 3), 3.0)],
+            v10=[np.full((2, 3), 4.0)],
+            rainc=[np.zeros((2, 3))],
+            rainnc=[np.zeros((2, 3))],
+            lat=lat,
+            lon=lon,
+            extra_dim_3d_fields={
+                "U": ([np.full((2, 2, 4), 3.0)], ("bottom_top", "south_north", "west_east_stag"), "m s-1"),
+                "V": ([np.full((2, 3, 3), 4.0)], ("bottom_top", "south_north_stag", "west_east"), "m s-1"),
+                "W": ([np.full((3, 2, 3), 2.0)], ("bottom_top_stag", "south_north", "west_east"), "m s-1"),
+            },
+        )
+
+        layer_defs = {
+            "u_mass": {
+                "source": {"kind": "wrf_native_3d_full"},
+                "expr": "U",
+                "units": "m s-1",
+                "metadata": {"description": "Real-like staggered U wind"},
+            },
+            "v_mass": {
+                "source": {"kind": "wrf_native_3d_full"},
+                "expr": "V",
+                "units": "m s-1",
+                "metadata": {"description": "Real-like staggered V wind"},
+            },
+            "w_mass": {
+                "source": {"kind": "wrf_native_3d_full"},
+                "expr": "W",
+                "units": "m s-1",
+                "metadata": {"description": "Real-like staggered vertical wind"},
+            },
+        }
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0]})
+        output_path = runs_dir / "path-section-vectors-destaggered.png"
+        figure_spec = {
+            "figure_id": "path_section_vectors_destaggered",
+            "view": {
+                "x_axis": {"kind": "path_coord", "name": "distance_km"},
+                "y_axis": {"name": "bottom_top"},
+                "selectors": {"time": {"mode": "current"}},
+                "sampling": {
+                    "path": {
+                        "kind": "polyline",
+                        "points": [
+                            {"lat": 0.5, "lon": 0.0},
+                            {"lat": 0.5, "lon": 2.0},
+                        ],
+                        "samples": 5,
+                    }
+                },
+            },
+            "render": {"format": "png", "title": "Destaggered Path Section Vectors", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "path-section-vectors-destaggered",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "u_layer_id": "u_mass",
+                    "v_layer_id": "v_mass",
+                    "vertical_layer_id": "w_mass",
+                    "draw": {
+                        "kind": "vector",
+                        "alpha": 0.9,
+                        "zorder": 20,
+                        "style": {
+                            "mode": "quiver",
+                            "stride": 1,
+                            "scale": 25,
+                            "color": "black",
+                            "pivot": "mid",
+                            "axis_projection": {
+                                "kind": "path_section",
+                                "x_component": "path_tangent",
+                                "y_component": "vertical",
+                            },
+                        },
+                    },
+                },
+                {
+                    "u_layer_id": "u_mass",
+                    "v_layer_id": "v_mass",
+                    "vertical_layer_id": "w_mass",
+                    "draw": {
+                        "kind": "vector",
+                        "alpha": 0.75,
+                        "zorder": 30,
+                        "style": {
+                            "mode": "quiver",
+                            "stride": 1,
+                            "scale": 25,
+                            "color": "red",
+                            "pivot": "mid",
+                            "axis_projection": {
+                                "kind": "path_section",
+                                "x_component": "path_normal",
+                                "y_component": "vertical",
+                            },
+                        },
+                    },
+                },
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                layer_defs,
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertTrue(Path(artifact["path"]).exists())
+        self.assertTrue(Path(artifact["sidecar_path"]).exists())
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["name"], "distance_km")
+        self.assertEqual(sidecar["view"]["y_axis"]["name"], "bottom_top")
+        self.assertEqual(len(sidecar["resolved_layers"]), 2)
+        tangent_layer = sidecar["resolved_layers"][0]
+        normal_layer = sidecar["resolved_layers"][1]
+        self.assertEqual(tangent_layer["u_layer_id"], "u_mass")
+        self.assertEqual(tangent_layer["v_layer_id"], "v_mass")
+        self.assertEqual(tangent_layer["vertical_layer_id"], "w_mass")
+        self.assertAlmostEqual(tangent_layer["u_summary"]["mean"], 3.0)
+        self.assertAlmostEqual(tangent_layer["v_summary"]["mean"], 4.0)
+        self.assertAlmostEqual(tangent_layer["vertical_summary"]["mean"], 2.0)
+        self.assertAlmostEqual(tangent_layer["x_component_summary"]["mean"], 3.0)
+        self.assertAlmostEqual(tangent_layer["y_component_summary"]["mean"], 2.0)
+        self.assertAlmostEqual(normal_layer["x_component_summary"]["mean"], 4.0)
+        self.assertAlmostEqual(normal_layer["y_component_summary"]["mean"], 2.0)
+
     def test_run_figure_request_supports_time_x_view(self) -> None:
         runs_dir = make_test_dir("_test_v2_time_x_view")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
@@ -847,6 +1323,75 @@ class FigureRenderingTests(unittest.TestCase):
         self.assertEqual(artifact["view"]["x_axis"]["name"], "time")
         self.assertEqual(artifact["view"]["y_axis"]["name"], "west_east")
         self.assertAlmostEqual(artifact["layer_summaries"]["t2_c"]["mean"], 31.85, places=6)
+
+    def test_run_figure_request_supports_time_x_view_with_mean_selector(self) -> None:
+        runs_dir = make_test_dir("_test_v2_time_x_view_mean_selector")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00", "2024-07-20_01:00:00", "2024-07-20_02:00:00"],
+            t2=[
+                np.array([[300.0, 302.0, 304.0], [306.0, 308.0, 310.0]]),
+                np.array([[301.0, 303.0, 305.0], [307.0, 309.0, 311.0]]),
+                np.array([[302.0, 304.0, 306.0], [308.0, 310.0, 312.0]]),
+            ],
+            u10=[np.ones((2, 3)), np.ones((2, 3)), np.ones((2, 3))],
+            v10=[np.ones((2, 3)), np.ones((2, 3)), np.ones((2, 3))],
+            rainc=[np.zeros((2, 3)), np.zeros((2, 3)), np.zeros((2, 3))],
+            rainnc=[np.zeros((2, 3)), np.zeros((2, 3)), np.zeros((2, 3))],
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0, 1, 2]})
+        figure_spec = {
+            "figure_id": "time_x_t2_mean",
+            "view_id": "time_x_line_mean",
+            "render": {"format": "png", "title": "Time-X T2 Mean", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "time-x-t2-mean",
+                "sidecar_json": True,
+                "overwrite": True,
+            },
+            "layers": [
+                {
+                    "layer_id": "t2_c",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "coolwarm", "show_colorbar": False},
+                    },
+                }
+            ],
+        }
+        view_defs = {
+            "time_x_line_mean": {
+                "x_axis": {"name": "time"},
+                "y_axis": {"name": "west_east"},
+                "selectors": {
+                    "south_north": {"mode": "mean"},
+                },
+            }
+        }
+
+        artifacts = run_figure_request(
+            figure_spec,
+            build_layer_defs(),
+            selected_frames,
+            runs_dir,
+            view_defs=view_defs,
+            dry_run=True,
+        )
+
+        self.assertEqual(len(artifacts), 1)
+        artifact = artifacts[0]
+        self.assertIsNone(artifact["current_frame"])
+        self.assertEqual(artifact["view"]["x_axis"]["name"], "time")
+        self.assertEqual(artifact["view"]["y_axis"]["name"], "west_east")
+        self.assertAlmostEqual(artifact["layer_summaries"]["t2_c"]["mean"], 32.85, places=6)
 
     def test_run_figure_request_supports_time_height_view_with_3d_full(self) -> None:
         runs_dir = make_test_dir("_test_v2_time_height_view")
@@ -932,6 +1477,462 @@ class FigureRenderingTests(unittest.TestCase):
         self.assertEqual(artifact["view"]["x_axis"]["name"], "time")
         self.assertEqual(artifact["view"]["y_axis"]["name"], "bottom_top")
         self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 4.5, places=6)
+
+    def test_run_figure_request_supports_time_height_view_with_height_m(self) -> None:
+        runs_dir = make_test_dir("_test_v2_time_height_height_m_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00", "2024-07-20_01:00:00"],
+            t2=[np.full((2, 2), 300.0), np.full((2, 2), 301.0)],
+            u10=[np.ones((2, 2)), np.ones((2, 2))],
+            v10=[np.ones((2, 2)), np.ones((2, 2))],
+            rainc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            extra_3d_fields={
+                "QVAPOR": (
+                    [
+                        np.array(
+                            [
+                                [[0.001, 0.002], [0.003, 0.004]],
+                                [[0.005, 0.006], [0.007, 0.008]],
+                            ]
+                        ),
+                        np.array(
+                            [
+                                [[0.002, 0.003], [0.004, 0.005]],
+                                [[0.006, 0.007], [0.008, 0.009]],
+                            ]
+                        ),
+                    ],
+                    "kg kg-1",
+                )
+            },
+            extra_stag_3d_fields={
+                "PH": (
+                    [
+                        np.array(
+                            [
+                                [[0.0, 0.0], [0.0, 0.0]],
+                                [[1000.0, 1000.0], [1000.0, 1000.0]],
+                                [[3000.0, 3000.0], [3000.0, 3000.0]],
+                            ]
+                        )
+                        * 9.81,
+                        np.array(
+                            [
+                                [[0.0, 0.0], [0.0, 0.0]],
+                                [[1200.0, 1200.0], [1200.0, 1200.0]],
+                                [[3200.0, 3200.0], [3200.0, 3200.0]],
+                            ]
+                        )
+                        * 9.81,
+                    ],
+                    "m2 s-2",
+                ),
+                "PHB": (
+                    [
+                        np.zeros((3, 2, 2), dtype=float),
+                        np.zeros((3, 2, 2), dtype=float),
+                    ],
+                    "m2 s-2",
+                ),
+            },
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0, 1]})
+        output_path = runs_dir / "time-height-qvapor-height-m.png"
+        figure_spec = {
+            "figure_id": "time_height_qvapor_height_m",
+            "view": {
+                "x_axis": {"name": "time"},
+                "y_axis": {"kind": "derived_coord", "name": "height_m"},
+                "selectors": {
+                    "south_north": {"mode": "index", "index": 0},
+                    "west_east": {"mode": "index", "index": 1},
+                },
+            },
+            "render": {"format": "png", "title": "Time-Height QVAPOR Height", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "time-height-qvapor-height-m",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": False},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 4.5, places=6)
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["name"], "time")
+        self.assertEqual(sidecar["view"]["y_axis"]["name"], "height_m")
+        self.assertEqual(sidecar["view"]["y_axis"]["units"], "m")
+
+    def test_run_figure_request_supports_height_time_view_with_height_m(self) -> None:
+        runs_dir = make_test_dir("_test_v2_height_time_height_m_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00", "2024-07-20_01:00:00"],
+            t2=[np.full((2, 2), 300.0), np.full((2, 2), 301.0)],
+            u10=[np.ones((2, 2)), np.ones((2, 2))],
+            v10=[np.ones((2, 2)), np.ones((2, 2))],
+            rainc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            extra_3d_fields={
+                "QVAPOR": (
+                    [
+                        np.array(
+                            [
+                                [[0.001, 0.002], [0.003, 0.004]],
+                                [[0.005, 0.006], [0.007, 0.008]],
+                            ]
+                        ),
+                        np.array(
+                            [
+                                [[0.002, 0.003], [0.004, 0.005]],
+                                [[0.006, 0.007], [0.008, 0.009]],
+                            ]
+                        ),
+                    ],
+                    "kg kg-1",
+                )
+            },
+            extra_stag_3d_fields={
+                "PH": (
+                    [
+                        np.array(
+                            [
+                                [[0.0, 0.0], [0.0, 0.0]],
+                                [[1000.0, 1000.0], [1000.0, 1000.0]],
+                                [[3000.0, 3000.0], [3000.0, 3000.0]],
+                            ]
+                        )
+                        * 9.81,
+                        np.array(
+                            [
+                                [[0.0, 0.0], [0.0, 0.0]],
+                                [[1200.0, 1200.0], [1200.0, 1200.0]],
+                                [[3200.0, 3200.0], [3200.0, 3200.0]],
+                            ]
+                        )
+                        * 9.81,
+                    ],
+                    "m2 s-2",
+                ),
+                "PHB": (
+                    [
+                        np.zeros((3, 2, 2), dtype=float),
+                        np.zeros((3, 2, 2), dtype=float),
+                    ],
+                    "m2 s-2",
+                ),
+            },
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0, 1]})
+        output_path = runs_dir / "height-time-qvapor-height-m.png"
+        figure_spec = {
+            "figure_id": "height_time_qvapor_height_m",
+            "view": {
+                "x_axis": {"kind": "derived_coord", "name": "height_m"},
+                "y_axis": {"name": "time"},
+                "selectors": {
+                    "south_north": {"mode": "index", "index": 0},
+                    "west_east": {"mode": "index", "index": 1},
+                },
+            },
+            "render": {"format": "png", "title": "Height-Time QVAPOR Height", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "height-time-qvapor-height-m",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": False},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 4.5, places=6)
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["name"], "height_m")
+        self.assertEqual(sidecar["view"]["x_axis"]["units"], "m")
+        self.assertEqual(sidecar["view"]["y_axis"]["name"], "time")
+
+    def test_run_figure_request_supports_time_pressure_view_with_3d_full(self) -> None:
+        runs_dir = make_test_dir("_test_v2_time_pressure_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00", "2024-07-20_01:00:00"],
+            t2=[np.full((2, 2), 300.0), np.full((2, 2), 301.0)],
+            u10=[np.ones((2, 2)), np.ones((2, 2))],
+            v10=[np.ones((2, 2)), np.ones((2, 2))],
+            rainc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            extra_3d_fields={
+                "QVAPOR": (
+                    [
+                        np.array(
+                            [
+                                [[0.001, 0.002], [0.003, 0.004]],
+                                [[0.005, 0.006], [0.007, 0.008]],
+                            ]
+                        ),
+                        np.array(
+                            [
+                                [[0.002, 0.003], [0.004, 0.005]],
+                                [[0.006, 0.007], [0.008, 0.009]],
+                            ]
+                        ),
+                    ],
+                    "kg kg-1",
+                ),
+                "P": (
+                    [
+                        np.array(
+                            [
+                                [[90000.0, 90000.0], [90000.0, 90000.0]],
+                                [[80000.0, 80000.0], [80000.0, 80000.0]],
+                            ]
+                        ),
+                        np.array(
+                            [
+                                [[89000.0, 89000.0], [89000.0, 89000.0]],
+                                [[79000.0, 79000.0], [79000.0, 79000.0]],
+                            ]
+                        ),
+                    ],
+                    "Pa",
+                ),
+                "PB": (
+                    [
+                        np.zeros((2, 2, 2), dtype=float),
+                        np.zeros((2, 2, 2), dtype=float),
+                    ],
+                    "Pa",
+                ),
+            },
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0, 1]})
+        output_path = runs_dir / "time-pressure-qvapor.png"
+        figure_spec = {
+            "figure_id": "time_pressure_qvapor",
+            "view": {
+                "x_axis": {"name": "time"},
+                "y_axis": {"kind": "derived_coord", "name": "pressure_hpa"},
+                "selectors": {
+                    "south_north": {"mode": "index", "index": 0},
+                    "west_east": {"mode": "index", "index": 1},
+                },
+            },
+            "render": {"format": "png", "title": "Time-Pressure QVAPOR", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "time-pressure-qvapor",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": False},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 4.5, places=6)
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["name"], "time")
+        self.assertEqual(sidecar["view"]["y_axis"]["name"], "pressure_hpa")
+        self.assertEqual(sidecar["view"]["y_axis"]["units"], "hPa")
+
+    def test_run_figure_request_supports_pressure_time_view_with_3d_full(self) -> None:
+        runs_dir = make_test_dir("_test_v2_pressure_time_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00", "2024-07-20_01:00:00"],
+            t2=[np.full((2, 2), 300.0), np.full((2, 2), 301.0)],
+            u10=[np.ones((2, 2)), np.ones((2, 2))],
+            v10=[np.ones((2, 2)), np.ones((2, 2))],
+            rainc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2)), np.zeros((2, 2))],
+            extra_3d_fields={
+                "QVAPOR": (
+                    [
+                        np.array(
+                            [
+                                [[0.001, 0.002], [0.003, 0.004]],
+                                [[0.005, 0.006], [0.007, 0.008]],
+                            ]
+                        ),
+                        np.array(
+                            [
+                                [[0.002, 0.003], [0.004, 0.005]],
+                                [[0.006, 0.007], [0.008, 0.009]],
+                            ]
+                        ),
+                    ],
+                    "kg kg-1",
+                ),
+                "P": (
+                    [
+                        np.array(
+                            [
+                                [[90000.0, 90000.0], [90000.0, 90000.0]],
+                                [[80000.0, 80000.0], [80000.0, 80000.0]],
+                            ]
+                        ),
+                        np.array(
+                            [
+                                [[89000.0, 89000.0], [89000.0, 89000.0]],
+                                [[79000.0, 79000.0], [79000.0, 79000.0]],
+                            ]
+                        ),
+                    ],
+                    "Pa",
+                ),
+                "PB": (
+                    [
+                        np.zeros((2, 2, 2), dtype=float),
+                        np.zeros((2, 2, 2), dtype=float),
+                    ],
+                    "Pa",
+                ),
+            },
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0, 1]})
+        output_path = runs_dir / "pressure-time-qvapor.png"
+        figure_spec = {
+            "figure_id": "pressure_time_qvapor",
+            "view": {
+                "x_axis": {"kind": "derived_coord", "name": "pressure_hpa"},
+                "y_axis": {"name": "time"},
+                "selectors": {
+                    "south_north": {"mode": "index", "index": 0},
+                    "west_east": {"mode": "index", "index": 1},
+                },
+            },
+            "render": {"format": "png", "title": "Pressure-Time QVAPOR", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "pressure-time-qvapor",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": False},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 4.5, places=6)
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["name"], "pressure_hpa")
+        self.assertEqual(sidecar["view"]["x_axis"]["units"], "hPa")
+        self.assertEqual(sidecar["view"]["y_axis"]["name"], "time")
 
     def test_run_figure_request_supports_distance_height_path_view(self) -> None:
         runs_dir = make_test_dir("_test_v2_distance_height_view")
@@ -1035,8 +2036,496 @@ class FigureRenderingTests(unittest.TestCase):
 
         sidecar = load_json(Path(artifact["sidecar_path"]))
         self.assertEqual(sidecar["view"]["x_axis"]["name"], "distance_km")
+        self.assertEqual(sidecar["view"]["x_axis"]["units"], "km")
         self.assertEqual(sidecar["view"]["y_axis"]["name"], "height_m")
+        self.assertEqual(sidecar["view"]["y_axis"]["units"], "m")
         self.assertEqual(len(sidecar["resolved_layers"]), 1)
+
+    def test_run_figure_request_path_view_uses_bilinear_sampling(self) -> None:
+        runs_dir = make_test_dir("_test_v2_distance_height_bilinear")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        lat = np.array([[10.0, 10.0], [11.0, 11.0]], dtype=float)
+        lon = np.array([[100.0, 101.0], [100.0, 101.0]], dtype=float)
+        qvapor_gkg = np.array(
+            [
+                [[1.0, 3.0], [5.0, 7.0]],
+                [[11.0, 13.0], [15.0, 17.0]],
+            ],
+            dtype=float,
+        )
+        ph_interfaces = np.array(
+            [
+                [[0.0, 0.0], [0.0, 0.0]],
+                [[200.0, 200.0], [200.0, 200.0]],
+                [[1000.0, 1000.0], [1000.0, 1000.0]],
+            ],
+            dtype=float,
+        ) * 9.81
+
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00"],
+            t2=[np.full((2, 2), 300.0)],
+            u10=[np.ones((2, 2))],
+            v10=[np.ones((2, 2))],
+            rainc=[np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2))],
+            lat=lat,
+            lon=lon,
+            extra_3d_fields={
+                "QVAPOR": ([qvapor_gkg / 1000.0], "kg kg-1"),
+            },
+            extra_stag_3d_fields={
+                "PH": ([ph_interfaces], "m2 s-2"),
+                "PHB": ([np.zeros_like(ph_interfaces)], "m2 s-2"),
+            },
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0]})
+        output_path = runs_dir / "distance-height-qvapor-bilinear.png"
+        figure_spec = {
+            "figure_id": "distance_height_qvapor_bilinear",
+            "view": {
+                "x_axis": {"kind": "path_coord", "name": "distance_km"},
+                "y_axis": {"kind": "derived_coord", "name": "height_m"},
+                "selectors": {},
+                "sampling": {
+                    "path": {
+                        "kind": "polyline",
+                        "points": [
+                            {"lat": 10.0, "lon": 100.0},
+                            {"lat": 11.0, "lon": 101.0},
+                        ],
+                        "samples": 3,
+                    }
+                },
+            },
+            "render": {"format": "png", "title": "Distance-Height QVAPOR Bilinear", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "distance-height-qvapor-bilinear",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": True},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 9.0, places=6)
+
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["label"], "distance_km")
+        self.assertEqual(sidecar["view"]["x_axis"]["units"], "km")
+        self.assertEqual(sidecar["view"]["y_axis"]["label"], "height_m")
+        self.assertEqual(sidecar["view"]["y_axis"]["units"], "m")
+
+    def test_run_figure_request_supports_distance_pressure_path_view(self) -> None:
+        runs_dir = make_test_dir("_test_v2_distance_pressure_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        lat = np.array([[10.0, 10.0], [11.0, 11.0]], dtype=float)
+        lon = np.array([[100.0, 101.0], [100.0, 101.0]], dtype=float)
+        qvapor_gkg = np.array(
+            [
+                [[1.0, 3.0], [5.0, 7.0]],
+                [[11.0, 13.0], [15.0, 17.0]],
+            ],
+            dtype=float,
+        )
+
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00"],
+            t2=[np.full((2, 2), 300.0)],
+            u10=[np.ones((2, 2))],
+            v10=[np.ones((2, 2))],
+            rainc=[np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2))],
+            lat=lat,
+            lon=lon,
+            extra_3d_fields={
+                "QVAPOR": ([qvapor_gkg / 1000.0], "kg kg-1"),
+                "P": (
+                    [
+                        np.array(
+                            [
+                                [[90000.0, 90000.0], [90000.0, 90000.0]],
+                                [[80000.0, 80000.0], [80000.0, 80000.0]],
+                            ]
+                        )
+                    ],
+                    "Pa",
+                ),
+                "PB": ([np.zeros((2, 2, 2), dtype=float)], "Pa"),
+            },
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0]})
+        output_path = runs_dir / "distance-pressure-qvapor.png"
+        figure_spec = {
+            "figure_id": "distance_pressure_qvapor",
+            "view": {
+                "x_axis": {"kind": "path_coord", "name": "distance_km"},
+                "y_axis": {"kind": "derived_coord", "name": "pressure_hpa"},
+                "selectors": {},
+                "sampling": {
+                    "path": {
+                        "kind": "polyline",
+                        "points": [
+                            {"lat": 10.0, "lon": 100.0},
+                            {"lat": 11.0, "lon": 101.0},
+                        ],
+                        "samples": 3,
+                    }
+                },
+            },
+            "render": {"format": "png", "title": "Distance-Pressure QVAPOR", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "distance-pressure-qvapor",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": True},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 9.0, places=6)
+
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["label"], "distance_km")
+        self.assertEqual(sidecar["view"]["x_axis"]["units"], "km")
+        self.assertEqual(sidecar["view"]["y_axis"]["label"], "pressure_hpa")
+        self.assertEqual(sidecar["view"]["y_axis"]["units"], "hPa")
+
+    def test_run_figure_request_supports_height_distance_path_view(self) -> None:
+        runs_dir = make_test_dir("_test_v2_height_distance_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        lat = np.array([[10.0, 10.0], [11.0, 11.0]], dtype=float)
+        lon = np.array([[100.0, 101.0], [100.0, 101.0]], dtype=float)
+        qvapor_gkg = np.array(
+            [
+                [[1.0, 3.0], [5.0, 7.0]],
+                [[11.0, 13.0], [15.0, 17.0]],
+            ],
+            dtype=float,
+        )
+        ph_interfaces = np.array(
+            [
+                [[0.0, 0.0], [0.0, 0.0]],
+                [[200.0, 200.0], [200.0, 200.0]],
+                [[1000.0, 1000.0], [1000.0, 1000.0]],
+            ],
+            dtype=float,
+        ) * 9.81
+
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00"],
+            t2=[np.full((2, 2), 300.0)],
+            u10=[np.ones((2, 2))],
+            v10=[np.ones((2, 2))],
+            rainc=[np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2))],
+            lat=lat,
+            lon=lon,
+            extra_3d_fields={
+                "QVAPOR": ([qvapor_gkg / 1000.0], "kg kg-1"),
+            },
+            extra_stag_3d_fields={
+                "PH": ([ph_interfaces], "m2 s-2"),
+                "PHB": ([np.zeros_like(ph_interfaces)], "m2 s-2"),
+            },
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0]})
+        output_path = runs_dir / "height-distance-qvapor.png"
+        figure_spec = {
+            "figure_id": "height_distance_qvapor",
+            "view": {
+                "x_axis": {"kind": "derived_coord", "name": "height_m"},
+                "y_axis": {"kind": "path_coord", "name": "distance_km"},
+                "selectors": {},
+                "sampling": {
+                    "path": {
+                        "kind": "polyline",
+                        "points": [
+                            {"lat": 10.0, "lon": 100.0},
+                            {"lat": 11.0, "lon": 101.0},
+                        ],
+                        "samples": 3,
+                    }
+                },
+            },
+            "render": {"format": "png", "title": "Height-Distance QVAPOR", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "height-distance-qvapor",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": True},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 9.0, places=6)
+
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["label"], "height_m")
+        self.assertEqual(sidecar["view"]["x_axis"]["units"], "m")
+        self.assertEqual(sidecar["view"]["y_axis"]["label"], "distance_km")
+        self.assertEqual(sidecar["view"]["y_axis"]["units"], "km")
+
+    def test_run_figure_request_supports_pressure_distance_path_view(self) -> None:
+        runs_dir = make_test_dir("_test_v2_pressure_distance_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        lat = np.array([[10.0, 10.0], [11.0, 11.0]], dtype=float)
+        lon = np.array([[100.0, 101.0], [100.0, 101.0]], dtype=float)
+        qvapor_gkg = np.array(
+            [
+                [[1.0, 3.0], [5.0, 7.0]],
+                [[11.0, 13.0], [15.0, 17.0]],
+            ],
+            dtype=float,
+        )
+
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00"],
+            t2=[np.full((2, 2), 300.0)],
+            u10=[np.ones((2, 2))],
+            v10=[np.ones((2, 2))],
+            rainc=[np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2))],
+            lat=lat,
+            lon=lon,
+            extra_3d_fields={
+                "QVAPOR": ([qvapor_gkg / 1000.0], "kg kg-1"),
+                "P": (
+                    [
+                        np.array(
+                            [
+                                [[90000.0, 90000.0], [90000.0, 90000.0]],
+                                [[80000.0, 80000.0], [80000.0, 80000.0]],
+                            ]
+                        )
+                    ],
+                    "Pa",
+                ),
+                "PB": ([np.zeros((2, 2, 2), dtype=float)], "Pa"),
+            },
+        )
+
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0]})
+        output_path = runs_dir / "pressure-distance-qvapor.png"
+        figure_spec = {
+            "figure_id": "pressure_distance_qvapor",
+            "view": {
+                "x_axis": {"kind": "derived_coord", "name": "pressure_hpa"},
+                "y_axis": {"kind": "path_coord", "name": "distance_km"},
+                "selectors": {},
+                "sampling": {
+                    "path": {
+                        "kind": "polyline",
+                        "points": [
+                            {"lat": 10.0, "lon": 100.0},
+                            {"lat": 11.0, "lon": 101.0},
+                        ],
+                        "samples": 3,
+                    }
+                },
+            },
+            "render": {"format": "png", "title": "Pressure-Distance QVAPOR", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "pressure-distance-qvapor",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": True},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 9.0, places=6)
+
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["label"], "pressure_hpa")
+        self.assertEqual(sidecar["view"]["x_axis"]["units"], "hPa")
+        self.assertEqual(sidecar["view"]["y_axis"]["label"], "distance_km")
+        self.assertEqual(sidecar["view"]["y_axis"]["units"], "km")
+
+    def test_run_figure_request_real_height_distance_view_smoke(self) -> None:
+        runs_dir = make_test_dir("_test_real_height_distance_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        real_state = load_json(REAL_PROJECT_JSON)
+        wrfout_path = resolve_repo_path(real_state["artifacts"]["wrfout_files"][0])
+        frames = enumerate_wrfout_frames([wrfout_path])
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0]})
+        output_path = runs_dir / "height-distance-qvapor-real.png"
+        figure_spec = {
+            "figure_id": "height_distance_qvapor_real",
+            "view": {
+                "x_axis": {"kind": "derived_coord", "name": "height_m"},
+                "y_axis": {"kind": "path_coord", "name": "distance_km"},
+                "selectors": {},
+                "sampling": {
+                    "path": {
+                        "kind": "polyline",
+                        "points": [
+                            {"lat": 30.9, "lon": 121.0},
+                            {"lat": 31.3, "lon": 121.6},
+                        ],
+                        "samples": 24,
+                    }
+                },
+            },
+            "render": {"format": "png", "title": "Real Height-Distance QVAPOR", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "height-distance-qvapor-real",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": True},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertTrue(Path(artifact["path"]).exists())
+        self.assertTrue(Path(artifact["sidecar_path"]).exists())
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 6.7053302147327685, places=6)
+
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["name"], "height_m")
+        self.assertEqual(sidecar["view"]["x_axis"]["units"], "m")
+        self.assertEqual(sidecar["view"]["y_axis"]["name"], "distance_km")
+        self.assertEqual(sidecar["view"]["y_axis"]["units"], "km")
 
     def test_run_figure_request_real_path_view_avoids_pcolormesh_warning(self) -> None:
         runs_dir = make_test_dir("_test_real_distance_height_view")
@@ -1100,12 +2589,81 @@ class FigureRenderingTests(unittest.TestCase):
         artifact = artifacts[0]
         self.assertTrue(Path(artifact["path"]).exists())
         self.assertTrue(Path(artifact["sidecar_path"]).exists())
-        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 6.708195225813376, places=6)
+        self.assertAlmostEqual(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"], 6.7053302147327685, places=6)
 
         sidecar = load_json(Path(artifact["sidecar_path"]))
         self.assertEqual(sidecar["view"]["x_axis"]["name"], "distance_km")
+        self.assertEqual(sidecar["view"]["x_axis"]["units"], "km")
         self.assertEqual(sidecar["view"]["y_axis"]["name"], "height_m")
+        self.assertEqual(sidecar["view"]["y_axis"]["units"], "m")
         self.assertEqual(sidecar["selected_frames"][0]["valid_time"], "2024-07-20_00:00:00")
+
+    def test_run_figure_request_real_time_pressure_view_smoke(self) -> None:
+        runs_dir = make_test_dir("_test_real_time_pressure_view")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        real_state = load_json(REAL_PROJECT_JSON)
+        wrfout_paths = [
+            resolve_repo_path(item)
+            for item in real_state["artifacts"]["wrfout_files"][:3]
+        ]
+        frames = enumerate_wrfout_frames(wrfout_paths)
+        selected_frames = select_wrfout_frames(frames, {"time_indices": [0, 1, 2]})
+        output_path = runs_dir / "time-pressure-qvapor-real.png"
+        figure_spec = {
+            "figure_id": "time_pressure_qvapor_real",
+            "view": {
+                "x_axis": {"name": "time"},
+                "y_axis": {"kind": "derived_coord", "name": "pressure_hpa"},
+                "selectors": {
+                    "south_north": {"mode": "index", "index": 0},
+                    "west_east": {"mode": "index", "index": 0},
+                },
+            },
+            "render": {"format": "png", "title": "Real Time-Pressure QVAPOR", "dpi": 120},
+            "output": {
+                "subdir": "",
+                "file_stem": "time-pressure-qvapor-real",
+                "sidecar_json": True,
+                "overwrite": True,
+                "path": output_path.as_posix(),
+            },
+            "layers": [
+                {
+                    "layer_id": "qvapor_cube_gkg",
+                    "draw": {
+                        "kind": "raster",
+                        "alpha": 1.0,
+                        "zorder": 10,
+                        "style": {"colormap": "viridis", "show_colorbar": True},
+                    },
+                }
+            ],
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            artifacts = run_figure_request(
+                figure_spec,
+                build_layer_defs(),
+                selected_frames,
+                runs_dir,
+                dry_run=False,
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(pcolormesh_warning_messages(caught), [])
+        artifact = artifacts[0]
+        self.assertIsNone(artifact["current_frame"])
+        self.assertTrue(Path(artifact["path"]).exists())
+        self.assertTrue(Path(artifact["sidecar_path"]).exists())
+        self.assertGreater(float(artifact["layer_summaries"]["qvapor_cube_gkg"]["mean"] or 0.0), 0.0)
+
+        sidecar = load_json(Path(artifact["sidecar_path"]))
+        self.assertEqual(sidecar["view"]["x_axis"]["name"], "time")
+        self.assertEqual(sidecar["view"]["y_axis"]["name"], "pressure_hpa")
+        self.assertEqual(sidecar["view"]["y_axis"]["units"], "hPa")
+        self.assertEqual(len(sidecar["selected_frames"]), 3)
 
 
 class WrfPostProjectTests(unittest.TestCase):

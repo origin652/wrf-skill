@@ -185,6 +185,7 @@ If you only want preprocessing first, stop after `wrf-wps`.
 
 `post_spec.json` is the intended request format for post-processing and diagnostics.
 The canonical shape is `schema_version=2` with top-level `defaults`, `style_defs`, optional `view_defs`, `layer_defs`, and `figures`.
+The current published contract stays on `schema_version=2`; `schema_version=3` remains a future protocol draft.
 
 Stable sections:
 
@@ -202,6 +203,7 @@ Render-layer shapes:
 
 - scalar layers use `layer_id`
 - vector layers use `u_layer_id` plus `v_layer_id` with `draw.kind=vector`
+- path-section vectors can also use `vertical_layer_id` together with explicit `draw.style.axis_projection`
 - the current vector renderer supports `style.mode=quiver`
 
 Current `layer_defs[*].source.kind` modes:
@@ -212,11 +214,18 @@ Current `layer_defs[*].source.kind` modes:
 - `wrf_diag` for built-in diagnostics such as `wind_speed_10m`, `wind_dir_10m`, `total_precip`, `temp_c_2m`, and `rh2`
 - `wrf_native` is still accepted as an alias of `wrf_native_2d`
 
-Current section-view scope (phase 1):
+For section rendering, native WRF `U`, `V`, and `W` can also be loaded through `wrf_native_3d_full`; the runtime destaggers them onto the mass grid before resolving the view.
 
-- supported view axes: `time`, `bottom_top`, `south_north`, `west_east`
-- supported section types: axis-aligned `time-x`, `time-y`, and `time-height`
-- vector draw (`draw.kind=vector`) is currently limited to map views
+Current view scope:
+
+- map views on `west_east x south_north`
+- axis-aligned native-dimension sections such as `time-x` and `time-y`
+- derived-coordinate sections using `time` with `height_m` or `pressure_hpa`
+- path sections using `distance_km` with `bottom_top`, `height_m`, or `pressure_hpa`
+- selector modes in `view.selectors`: `index`, `nearest_index`, `value`, `nearest_value`, `first`, `last`, `current`, `mean`, `min`, `max`, and `sum`
+- vector draw (`draw.kind=vector`) supports map views and path views with explicit `draw.style.axis_projection`
+
+For the current runnable v2 behavior, examples, and boundaries, see `docs/post_runtime_v2.md`.
 
 Generate a starter spec:
 
@@ -230,7 +239,14 @@ If you want a fuller v2 example with reusable layers, a per-frame figure, and a 
 cp templates/post_spec.example.json post_spec.json
 ```
 
-That example also includes a vector figure using reusable scalar `u10` and `v10` layers plus a `wind_quiver` style preset, and a `time-x` section figure powered by `view_defs`.
+That example also includes complete runnable examples for:
+
+- a map-vector figure using reusable scalar `u10` and `v10` layers plus a `wind_quiver` style preset
+- a `time-x` section powered by `view_defs`
+- a mean-reduced selector example
+- a `time-pressure` moisture column
+- a `distance_km x height_m` path section
+- a path-section vector overlay using native WRF `U`, `V`, and `W`
 
 Normalize and validate an existing spec:
 
@@ -256,8 +272,8 @@ python3 scripts/plot_wrfout.py \
 
 The machine-readable contract lives in `config/post_schema.json`.
 
-Generalized cross-sections are not implemented yet.
-A protocol draft for future arbitrary 2-axis views lives in `docs/post_view_protocol.md`.
+Current section support is intentionally scoped, but it already includes `time-x`, `time-y`, `time-height`, `time-pressure`, selector reductions, `distance_km` path sections, and explicit path-section vector projection.
+The runnable contract remains `schema_version=2`; a protocol draft for future arbitrary 2-axis views beyond that scope lives in `docs/post_view_protocol.md`.
 
 ## Scope
 

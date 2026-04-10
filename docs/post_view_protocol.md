@@ -2,9 +2,16 @@
 
 Status: proposal only. This document does not describe the current runnable `schema_version=2` contract.
 
+Phase 6 conclusion for this repository: keep the runnable contract on `schema_version=2` for now. `schema_version=3` is not being published yet, so this file remains a future-facing design draft.
+
+Some ideas from this draft have already landed in the v2 runtime, including `view_defs`, `time-x`, `time-y`, `time-height`, `time-pressure`, richer selector modes, `distance_km` path sections, and explicit path-section vector projection.
+This file still describes the future direction beyond the current validated v2 scope, especially arbitrary 2-axis combinations and section-vector behavior.
+
+For the current runnable behavior, see `docs/post_runtime_v2.md`.
+
 ## Goal
 
-The current post-processing runtime treats each layer as a 2D `south_north x west_east` field.
+This draft started from the earlier post-processing model where each layer was effectively forced into a 2D `south_north x west_east` field.
 That is enough for map products, but it blocks:
 
 - time-height sections

@@ -31,6 +31,7 @@ SUPPORTED_NATIVE_VIEW_AXES = {
 }
 SUPPORTED_DERIVED_VIEW_AXES = {
     "height_m",
+    "pressure_hpa",
 }
 SUPPORTED_PATH_VIEW_AXES = {
     "distance_km",
@@ -40,6 +41,11 @@ SUPPORTED_VIEW_AXES = (
     | SUPPORTED_DERIVED_VIEW_AXES
     | SUPPORTED_PATH_VIEW_AXES
 )
+AXIS_UNIT_DEFAULTS = {
+    "distance_km": "km",
+    "height_m": "m",
+    "pressure_hpa": "hPa",
+}
 ROOT_RESERVED_KEYS = {
     "schema_version",
     "project_name",
@@ -49,6 +55,10 @@ ROOT_RESERVED_KEYS = {
     "layer_defs",
     "figures",
 }
+MAP_VECTOR_PROJECTION_KIND = "map_xy"
+PATH_SECTION_VECTOR_PROJECTION_KIND = "path_section"
+MAP_VECTOR_COMPONENTS = {"u", "v"}
+PATH_SECTION_VECTOR_COMPONENTS = {"path_tangent", "path_normal", "vertical"}
 
 
 def load_json(path: Path | str) -> dict[str, Any]:
@@ -254,8 +264,8 @@ def default_figure_spec() -> dict[str, Any]:
 
 def default_view_spec() -> dict[str, Any]:
     return {
-        "x_axis": {"name": "west_east"},
-        "y_axis": {"name": "south_north"},
+        "x_axis": _default_view_axis("west_east"),
+        "y_axis": _default_view_axis("south_north"),
         "selectors": {},
     }
 
@@ -356,25 +366,37 @@ def _normalize_style_def(raw_style: Any) -> dict[str, Any]:
     return _normalize_draw(raw_style)
 
 
-def _normalize_view_axis(raw_axis: Any, *, fallback_name: str) -> dict[str, Any]:
-    normalized: dict[str, Any] = {
-        "name": fallback_name,
-        "label": None,
-        "units": None,
+def _default_view_axis(axis_name: Any) -> dict[str, Any]:
+    name = str(axis_name).strip() if axis_name is not None else ""
+    return {
+        "kind": _view_axis_kind({"name": name}),
+        "name": name,
+        "label": name or None,
+        "units": AXIS_UNIT_DEFAULTS.get(name),
     }
+
+
+def _normalize_view_axis(raw_axis: Any, *, fallback_name: str) -> dict[str, Any]:
+    normalized = _default_view_axis(fallback_name)
     if isinstance(raw_axis, dict):
+        if raw_axis.get("name") is not None:
+            normalized = _default_view_axis(raw_axis.get("name"))
         for key, value in raw_axis.items():
-            if key not in {"name", "label", "units"}:
+            if key not in {"kind", "name", "label", "units"}:
                 normalized[key] = deepcopy(value)
+        if raw_axis.get("kind") is not None:
+            normalized["kind"] = raw_axis.get("kind")
         if raw_axis.get("name") is not None:
             normalized["name"] = raw_axis.get("name")
         if raw_axis.get("label") is not None:
             normalized["label"] = raw_axis.get("label")
         if raw_axis.get("units") is not None:
             normalized["units"] = raw_axis.get("units")
+        if not normalized.get("kind"):
+            normalized["kind"] = _view_axis_kind(normalized)
         return normalized
     if raw_axis is not None:
-        normalized["name"] = raw_axis
+        normalized = _default_view_axis(raw_axis)
     return normalized
 
 
@@ -772,6 +794,23 @@ def _is_map_view(view: dict[str, Any]) -> bool:
     return {x_axis, y_axis} == {"west_east", "south_north"}
 
 
+def _is_path_view(view: dict[str, Any]) -> bool:
+    return "path_coord" in {
+        _view_axis_kind(view.get("x_axis")),
+        _view_axis_kind(view.get("y_axis")),
+    }
+
+
+def _vector_axis_projection(draw: Any) -> dict[str, Any] | None:
+    if not isinstance(draw, dict):
+        return None
+    style = draw.get("style")
+    if not isinstance(style, dict):
+        return None
+    axis_projection = style.get("axis_projection")
+    return axis_projection if isinstance(axis_projection, dict) else None
+
+
 def _validate_view_def(view_id: str, view_def: Any, errors: list[str], *, prefix: str | None = None) -> None:
     item_prefix = prefix or f"view_defs.{view_id}"
     if not isinstance(view_def, dict):
@@ -842,7 +881,19 @@ def _validate_view_def(view_id: str, view_def: Any, errors: list[str], *, prefix
             errors.append(f"{selector_prefix} must be an object")
             continue
         mode = selector.get("mode")
-        allowed_modes = {"index", "first", "last", "current"}
+        allowed_modes = {
+            "index",
+            "nearest_index",
+            "value",
+            "nearest_value",
+            "first",
+            "last",
+            "current",
+            "mean",
+            "min",
+            "max",
+            "sum",
+        }
         if mode not in allowed_modes:
             errors.append(
                 f"{selector_prefix}.mode must be one of {', '.join(sorted(allowed_modes))}"
@@ -854,12 +905,30 @@ def _validate_view_def(view_id: str, view_def: Any, errors: list[str], *, prefix
             index = selector.get("index")
             if not isinstance(index, int) or index < 0:
                 errors.append(f"{selector_prefix}.index must be a non-negative integer for mode=index")
+        if mode == "nearest_index":
+            index = selector.get("index")
+            if not isinstance(index, (int, float)):
+                errors.append(f"{selector_prefix}.index must be numeric for mode=nearest_index")
+        if mode in {"value", "nearest_value"}:
+            value = selector.get("value")
+            if not isinstance(value, (int, float)):
+                errors.append(f"{selector_prefix}.value must be numeric for mode={mode}")
 
     x_kind = _view_axis_kind(x_axis)
     y_kind = _view_axis_kind(y_axis)
+    if "derived_coord" in {x_kind, y_kind} and "path_coord" not in {x_kind, y_kind}:
+        derived_axis_name = x_name if x_kind == "derived_coord" else y_name
+        if {x_kind, y_kind} != {"native_dim", "derived_coord"}:
+            errors.append(
+                f"{item_prefix} currently requires derived_coord views to pair one time axis "
+                "with one derived vertical axis"
+            )
+        elif {x_name, y_name} != {"time", derived_axis_name}:
+            errors.append(
+                f"{item_prefix} currently requires derived_coord views to use "
+                "time with height_m or pressure_hpa"
+            )
     if "path_coord" in {x_kind, y_kind}:
-        if x_kind != "path_coord":
-            errors.append(f"{item_prefix} currently requires path_coord axes to be assigned to x_axis")
         sampling = view_def.get("sampling")
         sampling_prefix = f"{item_prefix}.sampling"
         if not isinstance(sampling, dict):
@@ -889,11 +958,14 @@ def _validate_view_def(view_id: str, view_def: Any, errors: list[str], *, prefix
         samples = path_cfg.get("samples")
         if not isinstance(samples, int) or samples < 2:
             errors.append(f"{path_prefix}.samples must be an integer >= 2")
-        if x_name != "distance_km":
-            errors.append(f"{item_prefix}.x_axis.name must be distance_km for first-pass path sections")
-        if y_name not in {"bottom_top", "height_m"}:
+        path_axis_name = x_name if x_kind == "path_coord" else y_name
+        other_axis_name = y_name if x_kind == "path_coord" else x_name
+        if path_axis_name != "distance_km":
+            errors.append(f"{item_prefix} path_coord axis must use name=distance_km")
+        if other_axis_name not in {"bottom_top", "height_m", "pressure_hpa"}:
             errors.append(
-                f"{item_prefix}.y_axis.name must be bottom_top or height_m for first-pass path sections"
+                f"{item_prefix} non-path axis must be bottom_top, height_m, or pressure_hpa "
+                "for first-pass path sections"
             )
 
 
@@ -995,6 +1067,43 @@ def _validate_draw(draw: Any, prefix: str, errors: list[str]) -> None:
         pivot = style.get("pivot")
         if pivot is not None and pivot not in {"tail", "mid", "middle", "tip"}:
             errors.append(f"{prefix}.style.pivot must be one of tail, mid, middle, tip when provided")
+        axis_projection = style.get("axis_projection")
+        if axis_projection is not None:
+            if not isinstance(axis_projection, dict):
+                errors.append(f"{prefix}.style.axis_projection must be an object when provided")
+            else:
+                projection_kind = axis_projection.get("kind")
+                if not isinstance(projection_kind, str) or projection_kind not in {
+                    MAP_VECTOR_PROJECTION_KIND,
+                    PATH_SECTION_VECTOR_PROJECTION_KIND,
+                }:
+                    errors.append(
+                        f"{prefix}.style.axis_projection.kind must be one of "
+                        f"{MAP_VECTOR_PROJECTION_KIND}, {PATH_SECTION_VECTOR_PROJECTION_KIND}"
+                    )
+                allowed_components = (
+                    MAP_VECTOR_COMPONENTS
+                    if projection_kind == MAP_VECTOR_PROJECTION_KIND
+                    else PATH_SECTION_VECTOR_COMPONENTS
+                )
+                for component_key in ("x_component", "y_component"):
+                    component_value = axis_projection.get(component_key)
+                    if not isinstance(component_value, str) or component_value not in allowed_components:
+                        errors.append(
+                            f"{prefix}.style.axis_projection.{component_key} must be one of "
+                            f"{', '.join(sorted(allowed_components))}"
+                        )
+                x_component = axis_projection.get("x_component")
+                y_component = axis_projection.get("y_component")
+                if (
+                    isinstance(x_component, str)
+                    and isinstance(y_component, str)
+                    and x_component == y_component
+                ):
+                    errors.append(
+                        f"{prefix}.style.axis_projection.x_component and "
+                        f"{prefix}.style.axis_projection.y_component must differ"
+                    )
 
 
 def _render_layer_target_ids(render_layer: dict[str, Any]) -> list[str]:
@@ -1002,7 +1111,7 @@ def _render_layer_target_ids(render_layer: dict[str, Any]) -> list[str]:
     kind = str(draw.get("kind") or "") if isinstance(draw, dict) else ""
     if kind == "vector":
         target_ids: list[str] = []
-        for key in ("u_layer_id", "v_layer_id"):
+        for key in ("u_layer_id", "v_layer_id", "vertical_layer_id"):
             value = render_layer.get(key)
             if isinstance(value, str) and value.strip():
                 target_ids.append(value)
@@ -1115,10 +1224,7 @@ def validate_post_spec(spec: dict[str, Any]) -> list[str]:
             _validate_draw(draw, f"{layer_prefix}.draw", errors)
             draw_kind = str(draw.get("kind") or "") if isinstance(draw, dict) else ""
             if draw_kind == "vector":
-                if not is_map_view:
-                    errors.append(
-                        f"{layer_prefix} draw.kind=vector is currently only supported for map views"
-                    )
+                axis_projection = _vector_axis_projection(draw)
                 for component_key in ("u_layer_id", "v_layer_id"):
                     component_id = layer.get(component_key)
                     if not isinstance(component_id, str) or not component_id.strip():
@@ -1129,13 +1235,60 @@ def validate_post_spec(spec: dict[str, Any]) -> list[str]:
                         )
                 if layer.get("layer_id") is not None:
                     errors.append(f"{layer_prefix}.layer_id is not used when draw.kind=vector")
+                if is_map_view:
+                    if axis_projection is not None:
+                        projection_kind = str(axis_projection.get("kind") or "")
+                        if projection_kind != MAP_VECTOR_PROJECTION_KIND:
+                            errors.append(
+                                f"{layer_prefix}.draw.style.axis_projection.kind must be "
+                                f"{MAP_VECTOR_PROJECTION_KIND} for map views"
+                            )
+                    if layer.get("vertical_layer_id") is not None:
+                        errors.append(f"{layer_prefix}.vertical_layer_id is not used for map-view vector layers")
+                elif _is_path_view(resolved_view):
+                    if axis_projection is None:
+                        errors.append(
+                            f"{layer_prefix}.draw.style.axis_projection is required for vector layers in path views"
+                        )
+                    else:
+                        projection_kind = str(axis_projection.get("kind") or "")
+                        if projection_kind != PATH_SECTION_VECTOR_PROJECTION_KIND:
+                            errors.append(
+                                f"{layer_prefix}.draw.style.axis_projection.kind must be "
+                                f"{PATH_SECTION_VECTOR_PROJECTION_KIND} for path-view vector layers"
+                            )
+                        x_component = str(axis_projection.get("x_component") or "")
+                        y_component = str(axis_projection.get("y_component") or "")
+                        needs_vertical = "vertical" in {x_component, y_component}
+                        vertical_layer_id = layer.get("vertical_layer_id")
+                        if needs_vertical:
+                            if not isinstance(vertical_layer_id, str) or not vertical_layer_id.strip():
+                                errors.append(
+                                    f"{layer_prefix}.vertical_layer_id must be a non-empty string when "
+                                    "path-section axis_projection uses vertical"
+                                )
+                            elif vertical_layer_id not in layer_defs:
+                                errors.append(
+                                    f"{layer_prefix}.vertical_layer_id references unknown layer_defs key: "
+                                    f"{vertical_layer_id}"
+                                )
+                        elif vertical_layer_id is not None:
+                            errors.append(
+                                f"{layer_prefix}.vertical_layer_id is only valid when path-section "
+                                "axis_projection uses vertical"
+                            )
+                else:
+                    errors.append(
+                        f"{layer_prefix} draw.kind=vector is currently only supported for map views "
+                        "and path views with explicit axis_projection"
+                    )
             else:
                 layer_id = layer.get("layer_id")
                 if not isinstance(layer_id, str) or not layer_id.strip():
                     errors.append(f"{layer_prefix}.layer_id must be a non-empty string")
                 elif layer_id not in layer_defs:
                     errors.append(f"{layer_prefix}.layer_id references unknown layer_defs key: {layer_id}")
-                for component_key in ("u_layer_id", "v_layer_id"):
+                for component_key in ("u_layer_id", "v_layer_id", "vertical_layer_id"):
                     if layer.get(component_key) is not None:
                         errors.append(f"{layer_prefix}.{component_key} is only valid when draw.kind=vector")
 
@@ -1239,29 +1392,57 @@ def interpret_post_spec(
                 v_layer_id = str(render_layer["v_layer_id"])
                 u_parsed = parsed_defs[u_layer_id]
                 v_parsed = parsed_defs[v_layer_id]
+                vertical_layer_id_raw = render_layer.get("vertical_layer_id")
+                vertical_layer_id = (
+                    str(vertical_layer_id_raw)
+                    if isinstance(vertical_layer_id_raw, str) and vertical_layer_id_raw.strip()
+                    else None
+                )
+                dependency_refs = (
+                    _collect_interpret_refs(u_parsed, known_layers, runtime)
+                    | _collect_interpret_refs(v_parsed, known_layers, runtime)
+                )
+                uses_current = bool(
+                    runtime["layer_uses_current"](u_layer_id, parsed_defs, memo=usage_memo)
+                    or runtime["layer_uses_current"](v_layer_id, parsed_defs, memo=usage_memo)
+                )
+                resolved_layer = {
+                    "u_layer_id": u_layer_id,
+                    "v_layer_id": v_layer_id,
+                    "style_id": render_layer.get("style_id"),
+                    "u_expr": str(layer_defs[u_layer_id].get("expr") or ""),
+                    "v_expr": str(layer_defs[v_layer_id].get("expr") or ""),
+                    "u_units": layer_defs[u_layer_id].get("units"),
+                    "v_units": layer_defs[v_layer_id].get("units"),
+                    "u_source_kind": str(layer_defs[u_layer_id].get("source", {}).get("kind") or "wrf_native"),
+                    "v_source_kind": str(layer_defs[v_layer_id].get("source", {}).get("kind") or "wrf_native"),
+                    "u_source": deepcopy(layer_defs[u_layer_id].get("source") or {}),
+                    "v_source": deepcopy(layer_defs[v_layer_id].get("source") or {}),
+                    "depends_on": [],
+                    "uses_current": False,
+                    "draw": draw,
+                }
+                if vertical_layer_id is not None:
+                    vertical_parsed = parsed_defs[vertical_layer_id]
+                    dependency_refs |= _collect_interpret_refs(vertical_parsed, known_layers, runtime)
+                    uses_current = uses_current or bool(
+                        runtime["layer_uses_current"](vertical_layer_id, parsed_defs, memo=usage_memo)
+                    )
+                    resolved_layer.update(
+                        {
+                            "vertical_layer_id": vertical_layer_id,
+                            "vertical_expr": str(layer_defs[vertical_layer_id].get("expr") or ""),
+                            "vertical_units": layer_defs[vertical_layer_id].get("units"),
+                            "vertical_source_kind": str(
+                                layer_defs[vertical_layer_id].get("source", {}).get("kind") or "wrf_native"
+                            ),
+                            "vertical_source": deepcopy(layer_defs[vertical_layer_id].get("source") or {}),
+                        }
+                    )
+                resolved_layer["depends_on"] = sorted(dependency_refs)
+                resolved_layer["uses_current"] = uses_current
                 resolved_layers.append(
-                    {
-                        "u_layer_id": u_layer_id,
-                        "v_layer_id": v_layer_id,
-                        "style_id": render_layer.get("style_id"),
-                        "u_expr": str(layer_defs[u_layer_id].get("expr") or ""),
-                        "v_expr": str(layer_defs[v_layer_id].get("expr") or ""),
-                        "u_units": layer_defs[u_layer_id].get("units"),
-                        "v_units": layer_defs[v_layer_id].get("units"),
-                        "u_source_kind": str(layer_defs[u_layer_id].get("source", {}).get("kind") or "wrf_native"),
-                        "v_source_kind": str(layer_defs[v_layer_id].get("source", {}).get("kind") or "wrf_native"),
-                        "u_source": deepcopy(layer_defs[u_layer_id].get("source") or {}),
-                        "v_source": deepcopy(layer_defs[v_layer_id].get("source") or {}),
-                        "depends_on": sorted(
-                            _collect_interpret_refs(u_parsed, known_layers, runtime)
-                            | _collect_interpret_refs(v_parsed, known_layers, runtime)
-                        ),
-                        "uses_current": bool(
-                            runtime["layer_uses_current"](u_layer_id, parsed_defs, memo=usage_memo)
-                            or runtime["layer_uses_current"](v_layer_id, parsed_defs, memo=usage_memo)
-                        ),
-                        "draw": draw,
-                    }
+                    resolved_layer
                 )
             else:
                 layer_id = str(render_layer["layer_id"])

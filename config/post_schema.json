@@ -337,13 +337,24 @@
         "name"
       ],
       "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "native_dim",
+            "derived_coord",
+            "path_coord"
+          ]
+        },
         "name": {
           "type": "string",
           "enum": [
             "time",
             "bottom_top",
             "south_north",
-            "west_east"
+            "west_east",
+            "height_m",
+            "pressure_hpa",
+            "distance_km"
           ]
         },
         "label": {
@@ -373,12 +384,22 @@
             "current",
             "first",
             "last",
-            "index"
+            "index",
+            "nearest_index",
+            "value",
+            "nearest_value",
+            "mean",
+            "min",
+            "max",
+            "sum"
           ]
         },
         "index": {
-          "type": "integer",
+          "type": "number",
           "minimum": 0
+        },
+        "value": {
+          "type": "number"
         }
       },
       "additionalProperties": true
@@ -401,6 +422,48 @@
           "additionalProperties": {
             "$ref": "#/$defs/view_selector"
           }
+        },
+        "sampling": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "polyline"
+                  ]
+                },
+                "points": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "lat",
+                      "lon"
+                    ],
+                    "properties": {
+                      "lat": {
+                        "type": "number"
+                      },
+                      "lon": {
+                        "type": "number"
+                      }
+                    },
+                    "additionalProperties": true
+                  }
+                },
+                "samples": {
+                  "type": "integer",
+                  "minimum": 2
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
         }
       },
       "additionalProperties": true
@@ -614,6 +677,39 @@
                       "middle",
                       "tip"
                     ]
+                  },
+                  "axis_projection": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "map_xy",
+                          "path_section"
+                        ]
+                      },
+                      "x_component": {
+                        "type": "string",
+                        "enum": [
+                          "u",
+                          "v",
+                          "path_tangent",
+                          "path_normal",
+                          "vertical"
+                        ]
+                      },
+                      "y_component": {
+                        "type": "string",
+                        "enum": [
+                          "u",
+                          "v",
+                          "path_tangent",
+                          "path_normal",
+                          "vertical"
+                        ]
+                      }
+                    },
+                    "additionalProperties": true
                   }
                 },
                 "required": [
@@ -644,6 +740,13 @@
           "minLength": 1
         },
         "v_layer_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "vertical_layer_id": {
           "type": [
             "string",
             "null"

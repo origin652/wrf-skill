@@ -1,6 +1,6 @@
 # Post-Processing Generalized View Roadmap
 
-Status date: 2026-04-09
+Status date: 2026-04-10
 
 This document tracks the next implementation steps for `wrf-post` as the runtime evolves beyond the current `schema_version=2` behavior.
 It is not the protocol draft itself. The design draft remains in [post_view_protocol.md](/mnt/c/Users/dell/Documents/sepcific_skill/docs/post_view_protocol.md).
@@ -10,22 +10,23 @@ It is not the protocol draft itself. The design draft remains in [post_view_prot
 The runtime now has these foundations:
 
 - Internal layering is split into `FieldCube -> ResolvedViewField`
-- Map views, `time-x`, and `time-height` all go through a unified view-resolution path
-- A first-pass path section is now available
-  - `x_axis.kind=path_coord`
-  - `x_axis.name=distance_km`
-  - `y_axis.name=bottom_top | height_m`
-  - `sampling.path.kind=polyline`
-- Real `wrfout` smoke runs now confirm that `distance_km x height_m` sections can be rendered
+- Map views, `time-x`, path sections, and time-vertical sections all go through a unified view-resolution path
+- Path sections support `distance_km` on either axis together with `bottom_top`, `height_m`, or `pressure_hpa`
+- Time-vertical sections support `time` with `height_m` or `pressure_hpa` in either axis order
+- Path sections use `sampling.path.kind=polyline`
+- Path sampling now uses bilinear interpolation instead of nearest-grid-point lookup
+- Default axis metadata now carries units for `distance_km`, `height_m`, and `pressure_hpa`
+- Real `wrfout` smoke runs now confirm that `distance_km x height_m`, `height_m x distance_km`, and `time x pressure_hpa` sections can be rendered
+- View selectors now support `nearest_index`, `value`, `nearest_value`, `mean`, `min`, `max`, and `sum`
+- Path sections now support `distance_km` on either `x_axis` or `y_axis`
+- Path-section vectors now support explicit `axis_projection` with `path_tangent`, `path_normal`, and `vertical`
+- Real `wrfout` smoke also now confirms path-section vectors driven by native WRF `U`, `V`, and `W` after mass-grid destaggering
+- The example template and README now include complete examples for pressure sections, reduction selectors, and path-section vectors
 
 Known limits:
 
-- Path sampling still uses nearest-grid-point lookup, not bilinear interpolation
-- `height_m` rendering is still first-pass, but explicit cell edges now keep real-data smoke runs free of `pcolormesh` coordinate warnings
-- `pressure_hpa` is not implemented yet
-- `nearest_value`, `value`, `mean`, `min`, `max`, and `sum` selectors are not implemented yet
-- Section-vector projection is not implemented yet
-- `distance_km` is currently restricted to `x_axis`
+- Section vectors are currently limited to path views with explicit `axis_projection`
+- Path sections are still limited to one `distance_km` axis plus one vertical axis
 
 ## Guiding Principles
 
@@ -35,6 +36,8 @@ Known limits:
 - Every phase should ship with both synthetic tests and real `wrfout` smoke coverage
 
 ## Phase 1: Stabilize Path Sections
+
+Status: completed
 
 Goal:
 
@@ -53,6 +56,8 @@ Done when:
 - Synthetic and real-data path-section tests both stay green
 
 ## Phase 2: Derived Vertical Coordinates
+
+Status: completed
 
 Goal:
 
@@ -76,6 +81,8 @@ all render reliably.
 
 ## Phase 3: Richer Selectors
 
+Status: completed
+
 Goal:
 
 - Move beyond index-only selection in views
@@ -98,6 +105,8 @@ Done when:
 
 ## Phase 4: Relax Path-Axis Restrictions
 
+Status: completed
+
 Goal:
 
 - Make path sections more general than the current `distance_km on x_axis` rule
@@ -105,7 +114,7 @@ Goal:
 Tasks:
 
 - Support `distance_km` on `y_axis`
-- Expand view-axis validation for more combinations
+- Expand view-axis validation for swapped path and time-vertical layouts
 - Normalize default axis metadata, labels, and units across view kinds
 
 Done when:
@@ -113,6 +122,8 @@ Done when:
 - The same data layer can be reused across multiple path-axis layouts without special-case figure logic
 
 ## Phase 5: Section Vector Protocol
+
+Status: completed
 
 Goal:
 
@@ -131,6 +142,8 @@ Done when:
 
 ## Phase 6: Protocol and Documentation Convergence
 
+Status: completed
+
 Goal:
 
 - Fold the stable runtime behavior back into the external protocol and examples
@@ -142,16 +155,23 @@ Tasks:
 - Add complete examples for path sections, pressure sections, and reduction selectors
 - Update the README post-processing section
 
+Decision:
+
+- Keep the current runnable contract on `schema_version=2`
+- Leave `schema_version=3` as a future design draft until the runtime grows beyond the current validated v2 scope
+
+Done when:
+
+- The template, README, and v2 guide all point to the same runnable `schema_version=2` contract
+- The protocol draft clearly stays future-facing
+
 ## Recommended Order
 
 Suggested priority:
 
-1. Stabilize path sections
-2. Add `pressure_hpa`
-3. Add richer selectors
-4. Relax path-axis restrictions
-5. Add section-vector protocol
-6. Converge docs and schema versioning
+1. Relax path-axis restrictions
+2. Add section-vector protocol
+3. Converge docs and schema versioning
 
 ## Work That Should Stay Out of Scope For Now
 

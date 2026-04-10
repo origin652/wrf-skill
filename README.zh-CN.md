@@ -186,6 +186,7 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 
 `post_spec.json` 是后处理和诊断请求的建议格式。
 规范形态是 `schema_version=2`，顶层包含 `defaults`、`style_defs`、可选的 `view_defs`、`layer_defs` 和 `figures`。
+当前对外发布的正式合同仍保持在 `schema_version=2`；`schema_version=3` 继续只作为未来协议草案存在。
 
 稳定部分：
 
@@ -203,6 +204,7 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 
 - 标量图层：使用 `layer_id`
 - 矢量图层：使用 `u_layer_id` 和 `v_layer_id`，同时 `draw.kind=vector`
+- 路径截面矢量还可以额外带 `vertical_layer_id`，并通过显式的 `draw.style.axis_projection` 指定投影
 - 当前矢量渲染器先支持 `style.mode=quiver`
 
 当前 `layer_defs[*].source.kind` 支持这几类：
@@ -213,11 +215,18 @@ python3 scripts/wrf_task.py start --project-name demo --step wrf-run
 - `wrf_diag`：调用内置诊断量，例如 `wind_speed_10m`、`wind_dir_10m`、`total_precip`、`temp_c_2m`、`rh2`
 - `wrf_native`：仍然接受，作为 `wrf_native_2d` 的兼容别名
 
-当前截面能力（第一阶段）：
+对截面视图来说，原生 WRF 的 `U`、`V`、`W` 也可以通过 `wrf_native_3d_full` 直接读取；runtime 会先把 staggered 网格去 stagger 到 mass grid，再做 view resolve。
 
-- 支持的 view 轴：`time`、`bottom_top`、`south_north`、`west_east`
-- 支持的截面类型：轴对齐的 `time-x`、`time-y`、`time-height`
-- 矢量渲染（`draw.kind=vector`）目前仍限制在地图视图
+当前视图范围：
+
+- 地图视图：`west_east x south_north`
+- 原生维度的轴对齐截面，例如 `time-x`、`time-y`
+- 派生坐标截面：`time` 搭配 `height_m` 或 `pressure_hpa`
+- 路径剖面：`distance_km` 搭配 `bottom_top`、`height_m` 或 `pressure_hpa`
+- `view.selectors` 当前支持：`index`、`nearest_index`、`value`、`nearest_value`、`first`、`last`、`current`、`mean`、`min`、`max`、`sum`
+- 矢量渲染（`draw.kind=vector`）现在支持地图视图，以及带显式 `draw.style.axis_projection` 的路径视图
+
+当前可直接运行的 v2 行为、示例和边界，见 `docs/post_runtime_v2.zh-CN.md`。
 
 生成一个起始 spec：
 
@@ -231,7 +240,14 @@ python3 scripts/post_spec.py --project-name demo --output post_spec.json
 cp templates/post_spec.example.json post_spec.json
 ```
 
-这个示例里也已经带了一个矢量图示例，使用可复用的 `u10`、`v10` 标量 layer，再通过 `wind_quiver` 样式组合成风矢量；同时还带了一个基于 `view_defs` 的 `time-x` 截面示例。
+这个示例里现在已经包含这些完整可运行例子：
+
+- 使用可复用 `u10`、`v10` layer 和 `wind_quiver` 样式的地图风矢量图
+- 一个基于 `view_defs` 的 `time-x` 截面
+- 一个 reduce selector 的 `mean` 示例
+- 一个 `time-pressure` 水汽柱状截面
+- 一个 `distance_km x height_m` 路径剖面
+- 一个基于原生 WRF `U`、`V`、`W` 的路径截面矢量叠加示例
 
 规范化并校验已有 spec：
 
@@ -257,8 +273,8 @@ python3 scripts/plot_wrfout.py \
 
 可机读的协议文件在 `config/post_schema.json`。
 
-通用截面现在还没有实现。
-如果你想先看未来“任意两轴视图”的协议草案，可以看 `docs/post_view_protocol.zh-CN.md`。
+当前截面支持是收敛过的，但已经包含 `time-x`、`time-y`、`time-height`、`time-pressure`、selector reduce、`distance_km` 路径剖面，以及显式的路径截面矢量投影。
+当前可运行合同仍是 `schema_version=2`；如果你想看超出这些范围的未来“任意两轴视图”协议草案，可以看 `docs/post_view_protocol.zh-CN.md`。
 
 ## 怎么理解这个仓库
 

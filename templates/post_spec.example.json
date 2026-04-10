@@ -83,6 +83,23 @@
         "pivot": "mid"
       }
     },
+    "section_wind_quiver": {
+      "kind": "vector",
+      "alpha": 0.85,
+      "zorder": 30,
+      "style": {
+        "mode": "quiver",
+        "stride": 3,
+        "scale": 400,
+        "color": "black",
+        "pivot": "mid",
+        "axis_projection": {
+          "kind": "path_section",
+          "x_component": "path_tangent",
+          "y_component": "vertical"
+        }
+      }
+    },
     "moisture_raster": {
       "kind": "raster",
       "alpha": 1.0,
@@ -126,6 +143,90 @@
         "south_north": {
           "mode": "index",
           "index": 50
+        }
+      }
+    },
+    "time_x_mean_sn": {
+      "x_axis": {
+        "name": "time",
+        "label": "time_index"
+      },
+      "y_axis": {
+        "name": "west_east",
+        "label": "west_east"
+      },
+      "selectors": {
+        "south_north": {
+          "mode": "mean"
+        }
+      }
+    },
+    "height_time_column": {
+      "x_axis": {
+        "kind": "derived_coord",
+        "name": "height_m"
+      },
+      "y_axis": {
+        "name": "time"
+      },
+      "selectors": {
+        "south_north": {
+          "mode": "index",
+          "index": 50
+        },
+        "west_east": {
+          "mode": "index",
+          "index": 50
+        }
+      }
+    },
+    "time_pressure_column": {
+      "x_axis": {
+        "name": "time"
+      },
+      "y_axis": {
+        "kind": "derived_coord",
+        "name": "pressure_hpa"
+      },
+      "selectors": {
+        "south_north": {
+          "mode": "index",
+          "index": 50
+        },
+        "west_east": {
+          "mode": "index",
+          "index": 50
+        }
+      }
+    },
+    "distance_height_path": {
+      "x_axis": {
+        "kind": "path_coord",
+        "name": "distance_km"
+      },
+      "y_axis": {
+        "kind": "derived_coord",
+        "name": "height_m"
+      },
+      "selectors": {
+        "time": {
+          "mode": "current"
+        }
+      },
+      "sampling": {
+        "path": {
+          "kind": "polyline",
+          "points": [
+            {
+              "lat": 31.2,
+              "lon": 121.4
+            },
+            {
+              "lat": 31.8,
+              "lon": 122.1
+            }
+          ],
+          "samples": 200
         }
       }
     }
@@ -191,6 +292,36 @@
         "description": "10m meridional wind component"
       }
     },
+    "u_mass": {
+      "source": {
+        "kind": "wrf_native_3d_full"
+      },
+      "expr": "U",
+      "units": "m s-1",
+      "metadata": {
+        "description": "WRF native zonal wind; section views destagger west_east_stag onto the mass grid"
+      }
+    },
+    "v_mass": {
+      "source": {
+        "kind": "wrf_native_3d_full"
+      },
+      "expr": "V",
+      "units": "m s-1",
+      "metadata": {
+        "description": "WRF native meridional wind; section views destagger south_north_stag onto the mass grid"
+      }
+    },
+    "w_mass": {
+      "source": {
+        "kind": "wrf_native_3d_full"
+      },
+      "expr": "W",
+      "units": "m s-1",
+      "metadata": {
+        "description": "WRF native vertical wind; section views destagger bottom_top_stag onto the mass grid"
+      }
+    },
     "qvapor_lvl0_gkg": {
       "source": {
         "kind": "wrf_native_3d",
@@ -202,6 +333,16 @@
       "units": "g kg-1",
       "metadata": {
         "description": "Lowest model-level water vapor mixing ratio"
+      }
+    },
+    "qvapor_cube_gkg": {
+      "source": {
+        "kind": "wrf_native_3d_full"
+      },
+      "expr": "QVAPOR * 1000",
+      "units": "g kg-1",
+      "metadata": {
+        "description": "3D water vapor mixing ratio for time-height and path sections"
       }
     },
     "accum_precip": {
@@ -362,6 +503,29 @@
       ]
     },
     {
+      "figure_id": "time_x_temperature_mean_section",
+      "view_id": "time_x_mean_sn",
+      "selectors": {
+        "time_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "render": {
+        "title": "Time-X Temperature Mean Section"
+      },
+      "output": {
+        "file_stem": "time-x-temperature-mean-section"
+      },
+      "layers": [
+        {
+          "layer_id": "t2_c",
+          "style_id": "temperature_raster"
+        }
+      ]
+    },
+    {
       "figure_id": "lowest_level_qvapor",
       "selectors": {
         "time_indices": [
@@ -384,6 +548,100 @@
         {
           "layer_id": "terrain",
           "style_id": "terrain_contours"
+        }
+      ]
+    },
+    {
+      "figure_id": "height_time_qvapor_column",
+      "view_id": "height_time_column",
+      "selectors": {
+        "time_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "render": {
+        "title": "Height-Time Water Vapor Column"
+      },
+      "output": {
+        "file_stem": "height-time-qvapor-column"
+      },
+      "layers": [
+        {
+          "layer_id": "qvapor_cube_gkg",
+          "style_id": "moisture_raster"
+        }
+      ]
+    },
+    {
+      "figure_id": "time_pressure_qvapor_column",
+      "view_id": "time_pressure_column",
+      "selectors": {
+        "time_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "render": {
+        "title": "Time-Pressure Water Vapor Column"
+      },
+      "output": {
+        "file_stem": "time-pressure-qvapor-column"
+      },
+      "layers": [
+        {
+          "layer_id": "qvapor_cube_gkg",
+          "style_id": "moisture_raster"
+        }
+      ]
+    },
+    {
+      "figure_id": "distance_height_qvapor_section",
+      "view_id": "distance_height_path",
+      "selectors": {
+        "time_indices": [
+          0
+        ]
+      },
+      "render": {
+        "title": "Distance-Height Water Vapor Section"
+      },
+      "output": {
+        "file_stem": "distance-height-qvapor-section"
+      },
+      "layers": [
+        {
+          "layer_id": "qvapor_cube_gkg",
+          "style_id": "moisture_raster"
+        }
+      ]
+    },
+    {
+      "figure_id": "distance_height_wind_section",
+      "view_id": "distance_height_path",
+      "selectors": {
+        "time_indices": [
+          0
+        ]
+      },
+      "render": {
+        "title": "Distance-Height Water Vapor with Path Wind Vectors"
+      },
+      "output": {
+        "file_stem": "distance-height-wind-section"
+      },
+      "layers": [
+        {
+          "layer_id": "qvapor_cube_gkg",
+          "style_id": "moisture_raster"
+        },
+        {
+          "u_layer_id": "u_mass",
+          "v_layer_id": "v_mass",
+          "vertical_layer_id": "w_mass",
+          "style_id": "section_wind_quiver"
         }
       ]
     }

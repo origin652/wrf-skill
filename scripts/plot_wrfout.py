@@ -55,6 +55,7 @@ SUPPORTED_NATIVE_VIEW_AXES = {
 }
 SUPPORTED_DERIVED_VIEW_AXES = {
     "height_m",
+    "pressure_hpa",
 }
 SUPPORTED_PATH_VIEW_AXES = {
     "distance_km",
@@ -64,6 +65,20 @@ SUPPORTED_VIEW_AXES = (
     | SUPPORTED_DERIVED_VIEW_AXES
     | SUPPORTED_PATH_VIEW_AXES
 )
+AXIS_UNIT_DEFAULTS = {
+    "distance_km": "km",
+    "height_m": "m",
+    "pressure_hpa": "hPa",
+}
+STAGGERED_MASS_DIMS = {
+    "bottom_top_stag",
+    "south_north_stag",
+    "west_east_stag",
+}
+MAP_VECTOR_PROJECTION_KIND = "map_xy"
+PATH_SECTION_VECTOR_PROJECTION_KIND = "path_section"
+MAP_VECTOR_COMPONENTS = {"u", "v"}
+PATH_SECTION_VECTOR_COMPONENTS = {"path_tangent", "path_normal", "vertical"}
 FUNCTION_NAMES = {
     "sqrt",
     "abs",
@@ -111,6 +126,37 @@ class ResolvedViewField:
 
 
 @dataclass(frozen=True)
+class PathSamplingContext:
+    frame: dict[str, Any]
+    time_index: int
+    distances: np.ndarray
+    sample_lats: np.ndarray
+    sample_lons: np.ndarray
+    corner_rows: np.ndarray
+    corner_cols: np.ndarray
+    sample_weights: np.ndarray
+    tangent_east: np.ndarray
+    tangent_north: np.ndarray
+    normal_east: np.ndarray
+    normal_north: np.ndarray
+
+
+@dataclass(frozen=True)
+class PathViewPreparation:
+    reduced_cube: FieldCube
+    selected_indices: dict[str, int]
+    sampling: PathSamplingContext
+    x_axis: dict[str, Any]
+    y_axis: dict[str, Any]
+    x_axis_name: str
+    y_axis_name: str
+    x_axis_kind: str
+    y_axis_kind: str
+    other_axis_name: str
+    other_axis_kind: str
+
+
+@dataclass(frozen=True)
 class NumberNode:
     value: float
 
@@ -148,8 +194,8 @@ def posix_path(path: Path | str) -> str:
 
 def default_view_spec() -> dict[str, Any]:
     return {
-        "x_axis": {"kind": "native_dim", "name": "west_east"},
-        "y_axis": {"kind": "native_dim", "name": "south_north"},
+        "x_axis": _default_view_axis("west_east"),
+        "y_axis": _default_view_axis("south_north"),
         "selectors": {},
     }
 
@@ -178,14 +224,21 @@ def _view_axis_kind(axis: Any) -> str:
     return ""
 
 
-def _normalize_view_axis(raw_axis: Any, *, fallback_name: str) -> dict[str, Any]:
-    normalized: dict[str, Any] = {
-        "kind": _view_axis_kind({"name": fallback_name}),
-        "name": fallback_name,
-        "label": None,
-        "units": None,
+def _default_view_axis(axis_name: Any) -> dict[str, Any]:
+    name = str(axis_name).strip() if axis_name is not None else ""
+    return {
+        "kind": _view_axis_kind({"name": name}),
+        "name": name,
+        "label": name or None,
+        "units": AXIS_UNIT_DEFAULTS.get(name),
     }
+
+
+def _normalize_view_axis(raw_axis: Any, *, fallback_name: str) -> dict[str, Any]:
+    normalized = _default_view_axis(fallback_name)
     if isinstance(raw_axis, dict):
+        if raw_axis.get("name") is not None:
+            normalized = _default_view_axis(raw_axis.get("name"))
         for key, value in raw_axis.items():
             if key not in {"kind", "name", "label", "units"}:
                 normalized[key] = deepcopy(value)
@@ -201,8 +254,7 @@ def _normalize_view_axis(raw_axis: Any, *, fallback_name: str) -> dict[str, Any]
             normalized["kind"] = _view_axis_kind(normalized)
         return normalized
     if raw_axis is not None:
-        normalized["name"] = raw_axis
-        normalized["kind"] = _view_axis_kind(normalized)
+        normalized = _default_view_axis(raw_axis)
     return normalized
 
 
@@ -265,6 +317,13 @@ def _is_map_view(view_spec: dict[str, Any]) -> bool:
     return {x_axis, y_axis} == {"west_east", "south_north"}
 
 
+def _is_path_view(view_spec: dict[str, Any]) -> bool:
+    return "path_coord" in {
+        _view_axis_kind(view_spec.get("x_axis")),
+        _view_axis_kind(view_spec.get("y_axis")),
+    }
+
+
 def _view_time_selector_mode(view_spec: dict[str, Any]) -> str | None:
     selectors = view_spec.get("selectors")
     if not isinstance(selectors, dict):
@@ -280,12 +339,18 @@ def _view_time_selector_mode(view_spec: dict[str, Any]) -> str | None:
 
 
 def _axis_label(view_axis: Any) -> str:
+    name = _view_axis_name(view_axis) or "axis"
     if isinstance(view_axis, dict):
         label = view_axis.get("label")
         if isinstance(label, str) and label.strip():
-            return label.strip()
-    name = _view_axis_name(view_axis)
-    return name or "axis"
+            base_label = label.strip()
+        else:
+            base_label = name
+        units = view_axis.get("units")
+        if isinstance(units, str) and units.strip():
+            return f"{base_label} ({units.strip()})"
+        return base_label
+    return name
 
 
 def ensure_plotting_dependencies() -> None:
@@ -533,6 +598,11 @@ def _load_3d_var(
         raise ValueError(
             f"Expected 3D field for {name} before level selection, received ndim={field.ndim}"
         )
+    field = _destagger_mass_grid_field(
+        field,
+        dims=tuple(variable.dimensions[-field.ndim:]),
+        name=name,
+    )
 
     level_index = _resolve_level_index(level_selector, int(field.shape[0]))
     level_field = np.asarray(field[level_index], dtype=float)
@@ -558,7 +628,40 @@ def _load_3d_var_full(
         raise ValueError(
             f"Expected 3D field for {name}, received ndim={field.ndim}"
         )
+    field = _destagger_mass_grid_field(
+        field,
+        dims=tuple(variable.dimensions[-field.ndim:]),
+        name=name,
+    )
     return field, getattr(variable, "units", None)
+
+
+def _destagger_mass_grid_field(
+    field: np.ndarray,
+    *,
+    dims: tuple[str, ...],
+    name: str,
+) -> np.ndarray:
+    resolved = np.asarray(field, dtype=float)
+    if resolved.ndim != len(dims):
+        return resolved
+
+    for axis, dim_name in enumerate(dims):
+        if dim_name not in STAGGERED_MASS_DIMS:
+            continue
+        if resolved.shape[axis] < 2:
+            raise ValueError(
+                f"Cannot destagger {name} along {dim_name}: size={resolved.shape[axis]}"
+            )
+        lower = [slice(None)] * resolved.ndim
+        upper = [slice(None)] * resolved.ndim
+        lower[axis] = slice(0, -1)
+        upper[axis] = slice(1, None)
+        resolved = 0.5 * (
+            resolved[tuple(lower)]
+            + resolved[tuple(upper)]
+        )
+    return resolved
 
 
 def _normalize_source_kind(kind: str | None) -> str:
@@ -852,6 +955,91 @@ def _resolve_axis_coords(value: Any, *, size: int) -> np.ndarray:
     return np.arange(size, dtype=float)
 
 
+def _selector_numeric_value(dim: str, selector: Any, field_name: str) -> float:
+    if not isinstance(selector, dict):
+        raise ValueError(f"selectors.{dim}.mode requires an object selector")
+    raw_value = selector.get(field_name)
+    if not isinstance(raw_value, (int, float)):
+        raise ValueError(f"selectors.{dim}.{field_name} must be numeric")
+    return float(raw_value)
+
+
+def _selector_reduce_values(mode: str, values: np.ndarray, *, axis: int) -> np.ndarray:
+    if mode == "mean":
+        return np.nanmean(values, axis=axis)
+    if mode == "min":
+        return np.nanmin(values, axis=axis)
+    if mode == "max":
+        return np.nanmax(values, axis=axis)
+    if mode == "sum":
+        return np.nansum(values, axis=axis)
+    raise ValueError(f"Unsupported reduction selector mode: {mode}")
+
+
+def _selector_index(
+    dim: str,
+    selector: Any,
+    coords: np.ndarray,
+    size: int,
+    *,
+    current_time_index: int | None,
+) -> int:
+    mode = _selector_mode(selector)
+    if mode is None:
+        mode = "current" if dim == "time" and current_time_index is not None else ("last" if dim == "time" else "first")
+        selector = {"mode": mode}
+
+    if mode == "first":
+        return 0
+    if mode == "last":
+        return size - 1
+    if mode == "current":
+        if dim != "time":
+            raise ValueError(f"selectors.{dim}.mode=current is only valid for the time axis")
+        if current_time_index is None:
+            raise ValueError("selectors.time.mode=current requires a current frame")
+        if current_time_index < 0 or current_time_index >= size:
+            raise ValueError(
+                f"current time index {current_time_index} is out of range for available times={size}"
+            )
+        return current_time_index
+    if mode == "index":
+        if not isinstance(selector, dict):
+            raise ValueError(f"selectors.{dim}.mode=index requires an object selector")
+        index = selector.get("index")
+        if not isinstance(index, int):
+            raise ValueError(f"selectors.{dim}.index must be an integer for mode=index")
+        if index < 0 or index >= size:
+            raise ValueError(
+                f"selectors.{dim}.index={index} is out of range for available size={size}"
+            )
+        return index
+    if mode == "nearest_index":
+        index_value = _selector_numeric_value(dim, selector, "index")
+        return int(np.clip(np.rint(index_value), 0, size - 1))
+    if mode == "value":
+        target = _selector_numeric_value(dim, selector, "value")
+        matches = np.flatnonzero(np.isclose(coords, target))
+        if matches.size == 0:
+            raise ValueError(
+                f"selectors.{dim}.value={target} did not match any coordinate in {coords.tolist()}"
+            )
+        return int(matches[0])
+    if mode == "nearest_value":
+        target = _selector_numeric_value(dim, selector, "value")
+        if coords.ndim != 1 or coords.shape[0] != size:
+            raise ValueError(f"selectors.{dim}.mode=nearest_value requires 1D coordinates")
+        finite_mask = np.isfinite(coords)
+        if not np.any(finite_mask):
+            raise ValueError(f"selectors.{dim}.mode=nearest_value found no finite coordinates")
+        candidates = np.where(finite_mask, np.abs(coords - target), np.inf)
+        return int(np.nanargmin(candidates))
+    raise ValueError(
+        f"Unsupported selectors.{dim}.mode: {mode}. Expected one of current, first, index, "
+        "last, nearest_index, value, nearest_value"
+    )
+
+
 def _reduce_cube_for_view(
     cube: FieldCube,
     *,
@@ -869,9 +1057,20 @@ def _reduce_cube_for_view(
             continue
         axis = active_dims.index(dim)
         selector = selectors.get(dim)
+        mode = _selector_mode(selector)
+        if mode is None:
+            mode = "current" if dim == "time" and current_time_index is not None else ("last" if dim == "time" else "first")
+            selector = {"mode": mode}
+        coord_array = _resolve_axis_coords(active_coords.get(dim), size=int(values.shape[axis]))
+        if mode in {"mean", "min", "max", "sum"}:
+            values = _selector_reduce_values(mode, values, axis=axis)
+            active_dims.pop(axis)
+            active_coords.pop(dim, None)
+            continue
         index = _selector_index(
             dim,
             selector,
+            coord_array,
             int(values.shape[axis]),
             current_time_index=current_time_index,
         )
@@ -889,11 +1088,18 @@ def _reduce_cube_for_view(
         if coord_array.ndim == 1 and coord_array.shape[0] == int(values.shape[axis]):
             coords[dim] = coord_array
 
+    metadata = deepcopy(cube.metadata)
+    if isinstance(metadata, dict):
+        metadata["selected_indices"] = {
+            **deepcopy(metadata.get("selected_indices") or {}),
+            **selected_indices,
+        }
+
     reduced_cube = _build_field_cube(
         values,
         dims=tuple(active_dims),
         units=cube.units,
-        metadata=deepcopy(cube.metadata),
+        metadata=metadata,
         coords=coords,
         label="view_reduction",
     )
@@ -956,6 +1162,48 @@ def _build_polyline_samples(path_config: dict[str, Any]) -> tuple[np.ndarray, np
     return distances, sample_lats, sample_lons
 
 
+def _path_unit_vectors(
+    sample_lats: np.ndarray,
+    sample_lons: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    sample_count = int(sample_lats.shape[0])
+    if sample_count < 2:
+        raise ValueError("Path vectors require at least two sampled points")
+
+    tangent_east = np.empty(sample_count, dtype=float)
+    tangent_north = np.empty(sample_count, dtype=float)
+    for index in range(sample_count):
+        if index == 0:
+            start_index, end_index = 0, 1
+        elif index == sample_count - 1:
+            start_index, end_index = sample_count - 2, sample_count - 1
+        else:
+            start_index, end_index = index - 1, index + 1
+
+        lat0 = float(sample_lats[start_index])
+        lat1 = float(sample_lats[end_index])
+        lon0 = float(sample_lons[start_index])
+        lon1 = float(sample_lons[end_index])
+        mean_lat_rad = np.radians((lat0 + lat1) / 2.0)
+        east_km = (lon1 - lon0) * 111.32 * np.cos(mean_lat_rad)
+        north_km = (lat1 - lat0) * 111.32
+        magnitude = float(np.hypot(east_km, north_km))
+        if magnitude <= 0.0:
+            if index > 0:
+                tangent_east[index] = tangent_east[index - 1]
+                tangent_north[index] = tangent_north[index - 1]
+            else:
+                tangent_east[index] = 1.0
+                tangent_north[index] = 0.0
+            continue
+        tangent_east[index] = east_km / magnitude
+        tangent_north[index] = north_km / magnitude
+
+    normal_east = -tangent_north
+    normal_north = tangent_east
+    return tangent_east, tangent_north, normal_east, normal_north
+
+
 def _nearest_horizontal_indices(
     lat_grid: np.ndarray,
     lon_grid: np.ndarray,
@@ -980,13 +1228,225 @@ def _nearest_horizontal_indices(
     return rows, cols
 
 
-def _sample_along_path(field: np.ndarray, row_indices: np.ndarray, col_indices: np.ndarray) -> np.ndarray:
+def _candidate_bilinear_cells(
+    row_index: int,
+    col_index: int,
+    shape: tuple[int, int],
+) -> list[tuple[int, int]]:
+    row_count, col_count = shape
+    candidates: list[tuple[int, int]] = []
+    if row_count < 2 or col_count < 2:
+        return candidates
+    for top_row in (row_index - 1, row_index):
+        if top_row < 0 or top_row >= row_count - 1:
+            continue
+        for left_col in (col_index - 1, col_index):
+            if left_col < 0 or left_col >= col_count - 1:
+                continue
+            candidate = (top_row, left_col)
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
+def _bilinear_weights(row_fraction: float, col_fraction: float) -> np.ndarray:
+    return np.asarray(
+        [
+            (1.0 - row_fraction) * (1.0 - col_fraction),
+            row_fraction * (1.0 - col_fraction),
+            (1.0 - row_fraction) * col_fraction,
+            row_fraction * col_fraction,
+        ],
+        dtype=float,
+    )
+
+
+def _bilinear_vector(
+    p00: np.ndarray,
+    p10: np.ndarray,
+    p01: np.ndarray,
+    p11: np.ndarray,
+    row_fraction: float,
+    col_fraction: float,
+) -> np.ndarray:
+    weights = _bilinear_weights(row_fraction, col_fraction)
+    return (
+        weights[0] * p00
+        + weights[1] * p10
+        + weights[2] * p01
+        + weights[3] * p11
+    )
+
+
+def _solve_bilinear_cell_fractions(
+    lat_cell: np.ndarray,
+    lon_cell: np.ndarray,
+    sample_lat: float,
+    sample_lon: float,
+) -> tuple[float, float, float] | None:
+    p00 = np.asarray([lat_cell[0, 0], lon_cell[0, 0]], dtype=float)
+    p10 = np.asarray([lat_cell[1, 0], lon_cell[1, 0]], dtype=float)
+    p01 = np.asarray([lat_cell[0, 1], lon_cell[0, 1]], dtype=float)
+    p11 = np.asarray([lat_cell[1, 1], lon_cell[1, 1]], dtype=float)
+    target = np.asarray([sample_lat, sample_lon], dtype=float)
+    if not np.all(np.isfinite([*p00, *p10, *p01, *p11, *target])):
+        return None
+
+    row_fraction = 0.5
+    col_fraction = 0.5
+    center = _bilinear_vector(p00, p10, p01, p11, row_fraction, col_fraction)
+    center_jacobian = np.column_stack(
+        [
+            0.5 * ((p10 - p00) + (p11 - p01)),
+            0.5 * ((p01 - p00) + (p11 - p10)),
+        ]
+    )
+    try:
+        delta = np.linalg.lstsq(center_jacobian, target - center, rcond=None)[0]
+        row_fraction += float(delta[0])
+        col_fraction += float(delta[1])
+    except np.linalg.LinAlgError:
+        pass
+
+    residual = float("inf")
+    for _ in range(12):
+        current = _bilinear_vector(p00, p10, p01, p11, row_fraction, col_fraction)
+        residual_vector = current - target
+        residual = float(np.linalg.norm(residual_vector))
+        if residual <= 1e-10:
+            break
+        d_row = (1.0 - col_fraction) * (p10 - p00) + col_fraction * (p11 - p01)
+        d_col = (1.0 - row_fraction) * (p01 - p00) + row_fraction * (p11 - p10)
+        jacobian = np.column_stack([d_row, d_col])
+        try:
+            step = np.linalg.lstsq(jacobian, residual_vector, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            return None
+        row_fraction -= float(step[0])
+        col_fraction -= float(step[1])
+
+    return row_fraction, col_fraction, residual
+
+
+def _bilinear_horizontal_weights(
+    lat_grid: np.ndarray,
+    lon_grid: np.ndarray,
+    sample_lats: np.ndarray,
+    sample_lons: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if lat_grid.shape != lon_grid.shape:
+        raise ValueError("XLAT and XLONG grids must share the same shape")
+
+    nearest_rows, nearest_cols = _nearest_horizontal_indices(
+        lat_grid,
+        lon_grid,
+        sample_lats,
+        sample_lons,
+    )
+    sample_count = int(sample_lats.shape[0])
+    corner_rows = np.empty((sample_count, 4), dtype=int)
+    corner_cols = np.empty((sample_count, 4), dtype=int)
+    weights = np.zeros((sample_count, 4), dtype=float)
+
+    for index, (row_index, col_index) in enumerate(zip(nearest_rows, nearest_cols)):
+        row_value = int(row_index)
+        col_value = int(col_index)
+        corner_rows[index, :] = row_value
+        corner_cols[index, :] = col_value
+        weights[index, 0] = 1.0
+
+        best_solution: tuple[float, int, int, float, float] | None = None
+        for top_row, left_col in _candidate_bilinear_cells(row_value, col_value, lat_grid.shape):
+            lat_cell = np.asarray(lat_grid[top_row : top_row + 2, left_col : left_col + 2], dtype=float)
+            lon_cell = np.asarray(lon_grid[top_row : top_row + 2, left_col : left_col + 2], dtype=float)
+            solution = _solve_bilinear_cell_fractions(
+                lat_cell,
+                lon_cell,
+                float(sample_lats[index]),
+                float(sample_lons[index]),
+            )
+            if solution is None:
+                continue
+            row_fraction, col_fraction, residual = solution
+            if not (-1e-6 <= row_fraction <= 1.0 + 1e-6 and -1e-6 <= col_fraction <= 1.0 + 1e-6):
+                continue
+            if best_solution is None or residual < best_solution[0]:
+                best_solution = (residual, top_row, left_col, row_fraction, col_fraction)
+
+        if best_solution is None:
+            continue
+
+        _, top_row, left_col, row_fraction, col_fraction = best_solution
+        row_fraction = min(max(row_fraction, 0.0), 1.0)
+        col_fraction = min(max(col_fraction, 0.0), 1.0)
+        corner_rows[index, :] = np.asarray([top_row, top_row + 1, top_row, top_row + 1], dtype=int)
+        corner_cols[index, :] = np.asarray([left_col, left_col, left_col + 1, left_col + 1], dtype=int)
+        weights[index, :] = _bilinear_weights(row_fraction, col_fraction)
+
+    return corner_rows, corner_cols, weights
+
+
+def _sample_along_path(field: np.ndarray, corner_rows: np.ndarray, corner_cols: np.ndarray, weights: np.ndarray) -> np.ndarray:
     values = np.asarray(field, dtype=float)
     if values.ndim == 2:
-        return values[row_indices, col_indices]
+        corners = np.stack(
+            [values[corner_rows[:, index], corner_cols[:, index]] for index in range(4)],
+            axis=0,
+        )
+        return np.sum(corners * weights.T, axis=0)
     if values.ndim == 3:
-        return values[:, row_indices, col_indices]
+        corners = np.stack(
+            [values[:, corner_rows[:, index], corner_cols[:, index]] for index in range(4)],
+            axis=0,
+        )
+        return np.sum(corners * weights.T[:, np.newaxis, :], axis=0)
     raise ValueError(f"path sampling requires 2D or 3D fields, received ndim={values.ndim}")
+
+
+def _build_path_sampling_context(
+    path_config: dict[str, Any],
+    *,
+    frame: dict[str, Any],
+    evaluator: "FigureEvaluator",
+) -> PathSamplingContext:
+    distances, sample_lats, sample_lons = _build_polyline_samples(path_config)
+    lat_grid, lon_grid = evaluator.load_horizontal_coords(frame)
+    corner_rows, corner_cols, sample_weights = _bilinear_horizontal_weights(
+        lat_grid,
+        lon_grid,
+        sample_lats,
+        sample_lons,
+    )
+    tangent_east, tangent_north, normal_east, normal_north = _path_unit_vectors(
+        sample_lats,
+        sample_lons,
+    )
+    return PathSamplingContext(
+        frame=frame,
+        time_index=int(frame["time_index"]),
+        distances=np.asarray(distances, dtype=float),
+        sample_lats=np.asarray(sample_lats, dtype=float),
+        sample_lons=np.asarray(sample_lons, dtype=float),
+        corner_rows=np.asarray(corner_rows, dtype=int),
+        corner_cols=np.asarray(corner_cols, dtype=int),
+        sample_weights=np.asarray(sample_weights, dtype=float),
+        tangent_east=np.asarray(tangent_east, dtype=float),
+        tangent_north=np.asarray(tangent_north, dtype=float),
+        normal_east=np.asarray(normal_east, dtype=float),
+        normal_north=np.asarray(normal_north, dtype=float),
+    )
+
+
+def _sample_with_path_context(
+    values: np.ndarray,
+    sampling: PathSamplingContext,
+) -> np.ndarray:
+    return _sample_along_path(
+        values,
+        sampling.corner_rows,
+        sampling.corner_cols,
+        sampling.sample_weights,
+    )
 
 
 def _selector_mode(selector: Any) -> str | None:
@@ -997,48 +1457,6 @@ def _selector_mode(selector: Any) -> str | None:
         return None
     token = mode.strip().lower()
     return token or None
-
-
-def _selector_index(
-    dim: str,
-    selector: Any,
-    size: int,
-    *,
-    current_time_index: int | None,
-) -> int:
-    mode = _selector_mode(selector)
-    if mode is None:
-        mode = "current" if dim == "time" and current_time_index is not None else ("last" if dim == "time" else "first")
-        selector = {"mode": mode}
-
-    if mode == "first":
-        return 0
-    if mode == "last":
-        return size - 1
-    if mode == "current":
-        if dim != "time":
-            raise ValueError(f"selectors.{dim}.mode=current is only valid for the time axis")
-        if current_time_index is None:
-            raise ValueError("selectors.time.mode=current requires a current frame")
-        if current_time_index < 0 or current_time_index >= size:
-            raise ValueError(
-                f"current time index {current_time_index} is out of range for available times={size}"
-            )
-        return current_time_index
-    if mode == "index":
-        if not isinstance(selector, dict):
-            raise ValueError(f"selectors.{dim}.mode=index requires an object selector")
-        index = selector.get("index")
-        if not isinstance(index, int):
-            raise ValueError(f"selectors.{dim}.index must be an integer for mode=index")
-        if index < 0 or index >= size:
-            raise ValueError(
-                f"selectors.{dim}.index={index} is out of range for available size={size}"
-            )
-        return index
-    raise ValueError(
-        f"Unsupported selectors.{dim}.mode: {mode}. Expected one of current, first, index, last"
-    )
 
 
 def _resolve_native_view_field(
@@ -1097,7 +1515,19 @@ def _resolve_native_view_field(
     )
 
 
-def _resolve_path_view_field(
+def _resolve_vertical_coord_field(
+    evaluator: "FigureEvaluator",
+    frame: dict[str, Any],
+    coord_name: str,
+) -> np.ndarray:
+    if coord_name == "height_m":
+        return evaluator.load_mass_height(frame)
+    if coord_name == "pressure_hpa":
+        return evaluator.load_mass_pressure(frame)
+    raise ValueError(f"Unsupported derived vertical coordinate: {coord_name}")
+
+
+def _resolve_time_vertical_view_field(
     cube: FieldCube,
     view_spec: dict[str, Any],
     *,
@@ -1106,7 +1536,7 @@ def _resolve_path_view_field(
     frames: list[dict[str, Any]] | None,
 ) -> ResolvedViewField:
     if evaluator is None or frames is None:
-        raise ValueError("Path-coordinate views require evaluator and frame context")
+        raise ValueError("Derived vertical views require evaluator and frame context")
 
     x_axis_name = _view_axis_name(view_spec.get("x_axis"))
     y_axis_name = _view_axis_name(view_spec.get("y_axis"))
@@ -1114,10 +1544,133 @@ def _resolve_path_view_field(
     y_axis_kind = _view_axis_kind(view_spec.get("y_axis"))
     selectors = view_spec.get("selectors") if isinstance(view_spec.get("selectors"), dict) else {}
 
-    if x_axis_kind != "path_coord" or x_axis_name != "distance_km":
-        raise ValueError("First-pass path sections currently require x_axis.kind=path_coord with name=distance_km")
-    if y_axis_name not in {"bottom_top", "height_m"}:
-        raise ValueError("First-pass path sections currently support y_axis bottom_top or height_m")
+    if {x_axis_kind, y_axis_kind} != {"native_dim", "derived_coord"}:
+        raise ValueError(
+            "Derived vertical views currently require exactly one time axis and one "
+            "derived vertical axis"
+        )
+    vertical_axis_name = y_axis_name if y_axis_kind == "derived_coord" else x_axis_name
+    if vertical_axis_name not in SUPPORTED_DERIVED_VIEW_AXES:
+        raise ValueError(
+            "Derived vertical views currently require one derived_coord axis with "
+            "name=height_m or pressure_hpa"
+        )
+    if {x_axis_name, y_axis_name} != {"time", vertical_axis_name}:
+        raise ValueError(
+            "Derived vertical views currently require one native_dim axis with name=time"
+        )
+
+    reduced_cube, selected_indices = _reduce_cube_for_view(
+        cube,
+        keep_dims={"time", "bottom_top"},
+        selectors=selectors,
+        current_time_index=current_time_index,
+    )
+    if tuple(reduced_cube.dims) != ("time", "bottom_top"):
+        raise ValueError(
+            "Derived vertical views currently require a 3D field with remaining dims "
+            "('time', 'bottom_top') after selector reduction"
+        )
+
+    row_index = selected_indices.get("south_north")
+    col_index = selected_indices.get("west_east")
+    if row_index is None or col_index is None:
+        raise ValueError(
+            "Derived vertical views currently require south_north and west_east "
+            "to be resolved by selectors or default reduction"
+        )
+
+    values = _ensure_2d_field(reduced_cube.values.T, label="derived_vertical_view")
+    vertical_profiles: list[np.ndarray] = []
+    for time_index, frame in enumerate(frames):
+        coord_field = _resolve_vertical_coord_field(evaluator, frame, vertical_axis_name)
+        if coord_field.ndim != 3:
+            raise ValueError(
+                f"Expected 3D vertical coordinate field for {vertical_axis_name}, received ndim={coord_field.ndim}"
+            )
+        if coord_field.shape[0] != values.shape[0]:
+            raise ValueError(
+                f"Vertical coordinate field shape {coord_field.shape} does not match "
+                f"reduced cube values {reduced_cube.values.shape}"
+            )
+        if time_index >= values.shape[1]:
+            raise ValueError(
+                f"Frame count {len(frames)} does not match reduced time axis size {values.shape[1]}"
+            )
+        vertical_profiles.append(
+            np.asarray(coord_field[:, int(row_index), int(col_index)], dtype=float)
+        )
+
+    vertical_coord_mesh = np.stack(vertical_profiles, axis=1)
+    reduced_coords = reduced_cube.coords or {}
+    time_coords = _resolve_axis_coords(reduced_coords.get("time"), size=int(reduced_cube.values.shape[0]))
+    metadata = deepcopy(reduced_cube.metadata)
+    metadata["source_dims"] = list(cube.dims)
+    metadata["selected_indices"] = {
+        "south_north": int(row_index),
+        "west_east": int(col_index),
+    }
+    metadata["vertical_coord"] = vertical_axis_name
+
+    if x_axis_name == "time":
+        resolved_values = values
+        resolved_x_coords = time_coords
+        resolved_y_coords = vertical_coord_mesh
+    else:
+        resolved_values = reduced_cube.values
+        resolved_x_coords = vertical_coord_mesh.T
+        resolved_y_coords = time_coords
+
+    return ResolvedViewField(
+        values=resolved_values,
+        dims=(y_axis_name, x_axis_name),
+        x_axis=_normalize_view_axis(view_spec.get("x_axis"), fallback_name=x_axis_name),
+        y_axis=_normalize_view_axis(view_spec.get("y_axis"), fallback_name=y_axis_name),
+        x_coords=np.asarray(resolved_x_coords, dtype=float),
+        y_coords=np.asarray(resolved_y_coords, dtype=float),
+        units=cube.units,
+        metadata=metadata,
+    )
+
+
+def _prepare_path_view_field(
+    cube: FieldCube,
+    view_spec: dict[str, Any],
+    *,
+    current_time_index: int | None,
+    evaluator: "FigureEvaluator",
+    frames: list[dict[str, Any]],
+) -> PathViewPreparation:
+    x_axis_name = _view_axis_name(view_spec.get("x_axis"))
+    y_axis_name = _view_axis_name(view_spec.get("y_axis"))
+    x_axis_kind = _view_axis_kind(view_spec.get("x_axis"))
+    y_axis_kind = _view_axis_kind(view_spec.get("y_axis"))
+    selectors = view_spec.get("selectors") if isinstance(view_spec.get("selectors"), dict) else {}
+
+    if {x_axis_kind, y_axis_kind} != {"path_coord", "native_dim"} and not (
+        "path_coord" in {x_axis_kind, y_axis_kind} and "derived_coord" in {x_axis_kind, y_axis_kind}
+    ):
+        raise ValueError(
+            "First-pass path sections currently require exactly one path_coord axis and one "
+            "vertical axis (bottom_top, height_m, or pressure_hpa)"
+        )
+    if x_axis_kind == "path_coord" and x_axis_name != "distance_km":
+        raise ValueError("Path-coordinate axes currently require name=distance_km")
+    if y_axis_kind == "path_coord" and y_axis_name != "distance_km":
+        raise ValueError("Path-coordinate axes currently require name=distance_km")
+
+    other_axis_name = y_axis_name if x_axis_kind == "path_coord" else x_axis_name
+    other_axis_kind = y_axis_kind if x_axis_kind == "path_coord" else x_axis_kind
+    if other_axis_name not in {"bottom_top", *SUPPORTED_DERIVED_VIEW_AXES}:
+        raise ValueError(
+            "First-pass path sections currently support the non-path axis as "
+            "bottom_top, height_m, or pressure_hpa"
+        )
+    if other_axis_kind not in {"native_dim", "derived_coord"}:
+        raise ValueError(
+            "First-pass path sections currently require the non-path axis to be "
+            "native_dim or derived_coord"
+        )
     if _view_axis_name(view_spec.get("x_axis")) == "time" or _view_axis_name(view_spec.get("y_axis")) == "time":
         raise ValueError("Path-coordinate sections do not currently support time as a plotted axis")
 
@@ -1147,45 +1700,259 @@ def _resolve_path_view_field(
     if not isinstance(path_config, dict):
         raise ValueError("distance_km sections require view.sampling.path")
 
-    distances, sample_lats, sample_lons = _build_polyline_samples(path_config)
-    lat_grid, lon_grid = evaluator.load_horizontal_coords(frame)
-    row_indices, col_indices = _nearest_horizontal_indices(
-        lat_grid,
-        lon_grid,
-        sample_lats,
-        sample_lons,
+    sampling_context = _build_path_sampling_context(
+        path_config,
+        frame=frame,
+        evaluator=evaluator,
     )
-    sampled_values = _sample_along_path(reduced_cube.values, row_indices, col_indices)
+    return PathViewPreparation(
+        reduced_cube=reduced_cube,
+        selected_indices=selected_indices,
+        sampling=sampling_context,
+        x_axis=_normalize_view_axis(view_spec.get("x_axis"), fallback_name=x_axis_name),
+        y_axis=_normalize_view_axis(view_spec.get("y_axis"), fallback_name=y_axis_name),
+        x_axis_name=x_axis_name,
+        y_axis_name=y_axis_name,
+        x_axis_kind=x_axis_kind,
+        y_axis_kind=y_axis_kind,
+        other_axis_name=other_axis_name,
+        other_axis_kind=other_axis_kind,
+    )
+
+
+def _resolve_path_vertical_coords(
+    prepared: PathViewPreparation,
+    *,
+    evaluator: "FigureEvaluator",
+) -> np.ndarray | None:
+    if prepared.other_axis_kind != "derived_coord":
+        return None
+    vertical_coord = _resolve_vertical_coord_field(
+        evaluator,
+        prepared.sampling.frame,
+        prepared.other_axis_name,
+    )
+    if vertical_coord.shape != tuple(prepared.reduced_cube.values.shape):
+        raise ValueError(
+            f"Vertical coordinate field shape {vertical_coord.shape} does not match "
+            f"sampled cube shape {prepared.reduced_cube.values.shape}"
+        )
+    return _sample_with_path_context(vertical_coord, prepared.sampling)
+
+
+def _build_path_resolved_view_field(
+    sampled_values: np.ndarray,
+    prepared: PathViewPreparation,
+    *,
+    vertical_coords: np.ndarray | None,
+    units: str | None,
+    metadata: dict[str, Any],
+) -> ResolvedViewField:
     if sampled_values.ndim != 2:
         raise ValueError("distance_km sections expected a 2D sampled field after path extraction")
 
-    y_coords: np.ndarray
-    if y_axis_kind == "derived_coord" or y_axis_name == "height_m":
-        mass_height = evaluator.load_mass_height(frame)
-        if mass_height.shape != tuple(reduced_cube.values.shape):
-            raise ValueError(
-                f"Mass-height field shape {mass_height.shape} does not match sampled cube shape {reduced_cube.values.shape}"
-            )
-        y_coords = _sample_along_path(mass_height, row_indices, col_indices)
+    if prepared.x_axis_kind == "path_coord":
+        resolved_values = sampled_values
+        resolved_x_coords = np.asarray(prepared.sampling.distances, dtype=float)
+        if prepared.other_axis_kind == "derived_coord":
+            resolved_y_coords = np.asarray(vertical_coords, dtype=float)
+        else:
+            resolved_y_coords = np.arange(sampled_values.shape[0], dtype=float)
     else:
-        y_coords = np.arange(sampled_values.shape[0], dtype=float)
+        resolved_values = sampled_values.T
+        resolved_y_coords = np.asarray(prepared.sampling.distances, dtype=float)
+        if prepared.other_axis_kind == "derived_coord":
+            if vertical_coords is None:
+                raise ValueError("Derived path views require vertical coordinates")
+            resolved_x_coords = np.asarray(vertical_coords.T, dtype=float)
+        else:
+            resolved_x_coords = np.arange(sampled_values.shape[0], dtype=float)
 
-    metadata = deepcopy(reduced_cube.metadata)
+    return ResolvedViewField(
+        values=np.asarray(resolved_values, dtype=float),
+        dims=(prepared.y_axis_name, prepared.x_axis_name),
+        x_axis=deepcopy(prepared.x_axis),
+        y_axis=deepcopy(prepared.y_axis),
+        x_coords=np.asarray(resolved_x_coords, dtype=float),
+        y_coords=np.asarray(resolved_y_coords, dtype=float),
+        units=units,
+        metadata=metadata,
+    )
+
+
+def _resolve_vector_axis_projection(
+    draw: dict[str, Any],
+    *,
+    view_spec: dict[str, Any],
+) -> dict[str, str]:
+    style = draw.get("style")
+    if not isinstance(style, dict):
+        raise ValueError("Vector draw.style must be an object")
+    raw_projection = style.get("axis_projection")
+    if raw_projection is None:
+        if _is_map_view(view_spec):
+            return {
+                "kind": MAP_VECTOR_PROJECTION_KIND,
+                "x_component": "u",
+                "y_component": "v",
+            }
+        raise ValueError("Vector layers in non-map views require draw.style.axis_projection")
+    if not isinstance(raw_projection, dict):
+        raise ValueError("draw.style.axis_projection must be an object when provided")
+
+    projection_kind = str(raw_projection.get("kind") or "").strip()
+    x_component = str(raw_projection.get("x_component") or "").strip()
+    y_component = str(raw_projection.get("y_component") or "").strip()
+    if projection_kind == MAP_VECTOR_PROJECTION_KIND:
+        if not _is_map_view(view_spec):
+            raise ValueError("draw.style.axis_projection.kind=map_xy is only valid for map views")
+        allowed_components = MAP_VECTOR_COMPONENTS
+    elif projection_kind == PATH_SECTION_VECTOR_PROJECTION_KIND:
+        if not _is_path_view(view_spec):
+            raise ValueError("draw.style.axis_projection.kind=path_section is only valid for path views")
+        allowed_components = PATH_SECTION_VECTOR_COMPONENTS
+    else:
+        raise ValueError(
+            f"Unsupported draw.style.axis_projection.kind: {projection_kind}. "
+            f"Expected {MAP_VECTOR_PROJECTION_KIND} or {PATH_SECTION_VECTOR_PROJECTION_KIND}"
+        )
+
+    for component_key, component_value in (("x_component", x_component), ("y_component", y_component)):
+        if component_value not in allowed_components:
+            raise ValueError(
+                f"draw.style.axis_projection.{component_key} must be one of "
+                f"{', '.join(sorted(allowed_components))}"
+            )
+    if x_component == y_component:
+        raise ValueError("draw.style.axis_projection.x_component and y_component must differ")
+    return {
+        "kind": projection_kind,
+        "x_component": x_component,
+        "y_component": y_component,
+    }
+
+
+def _coerce_same_shape_view(
+    field: ResolvedViewField,
+    *,
+    expected: ResolvedViewField,
+    label: str,
+) -> ResolvedViewField:
+    if field.values.shape != expected.values.shape:
+        raise ValueError(
+            f"{label} resolved to shape {field.values.shape}, expected {expected.values.shape} "
+            "to match the section vector geometry"
+        )
+    return field
+
+
+def _resolve_path_projected_horizontal_component(
+    u_cube: FieldCube,
+    v_cube: FieldCube,
+    view_spec: dict[str, Any],
+    *,
+    component: str,
+    current_time_index: int | None,
+    evaluator: "FigureEvaluator",
+    frames: list[dict[str, Any]],
+) -> ResolvedViewField:
+    prepared = _prepare_path_view_field(
+        u_cube,
+        view_spec,
+        current_time_index=current_time_index,
+        evaluator=evaluator,
+        frames=frames,
+    )
+    selectors = view_spec.get("selectors") if isinstance(view_spec.get("selectors"), dict) else {}
+    reduced_v_cube, selected_v_indices = _reduce_cube_for_view(
+        v_cube,
+        keep_dims={"bottom_top", "south_north", "west_east"},
+        selectors=selectors,
+        current_time_index=current_time_index,
+    )
+    if tuple(reduced_v_cube.dims) != tuple(prepared.reduced_cube.dims):
+        raise ValueError(
+            f"Path vector component v reduced dims {reduced_v_cube.dims} do not match "
+            f"u reduced dims {prepared.reduced_cube.dims}"
+        )
+    if reduced_v_cube.values.shape != prepared.reduced_cube.values.shape:
+        raise ValueError(
+            f"Path vector component v shape {reduced_v_cube.values.shape} does not match "
+            f"u shape {prepared.reduced_cube.values.shape}"
+        )
+    if selected_v_indices.get("time") != prepared.selected_indices.get("time"):
+        raise ValueError("Path vector components must resolve to the same time index")
+
+    sampled_u = _sample_with_path_context(prepared.reduced_cube.values, prepared.sampling)
+    sampled_v = _sample_with_path_context(reduced_v_cube.values, prepared.sampling)
+    if component == "path_tangent":
+        projected_values = (
+            sampled_u * prepared.sampling.tangent_east.reshape(1, -1)
+            + sampled_v * prepared.sampling.tangent_north.reshape(1, -1)
+        )
+    elif component == "path_normal":
+        projected_values = (
+            sampled_u * prepared.sampling.normal_east.reshape(1, -1)
+            + sampled_v * prepared.sampling.normal_north.reshape(1, -1)
+        )
+    else:
+        raise ValueError(f"Unsupported path horizontal projection component: {component}")
+
+    vertical_coords = _resolve_path_vertical_coords(prepared, evaluator=evaluator)
+    metadata = deepcopy(prepared.reduced_cube.metadata)
+    metadata["source_dims"] = list(u_cube.dims)
+    metadata["sampling"] = {
+        "path_kind": "polyline",
+        "interpolation": "bilinear",
+        "sample_count": int(prepared.sampling.distances.shape[0]),
+        "selected_time_index": int(prepared.sampling.time_index),
+    }
+    metadata["axis_projection_component"] = component
+    metadata["path_basis"] = {
+        "tangent_frame": "east_north",
+        "normal_orientation": "left_of_path",
+    }
+    units = u_cube.units if u_cube.units == v_cube.units else None
+    return _build_path_resolved_view_field(
+        np.asarray(projected_values, dtype=float),
+        prepared,
+        vertical_coords=vertical_coords,
+        units=units,
+        metadata=metadata,
+    )
+
+def _resolve_path_view_field(
+    cube: FieldCube,
+    view_spec: dict[str, Any],
+    *,
+    current_time_index: int | None,
+    evaluator: "FigureEvaluator" | None,
+    frames: list[dict[str, Any]] | None,
+) -> ResolvedViewField:
+    if evaluator is None or frames is None:
+        raise ValueError("Path-coordinate views require evaluator and frame context")
+    prepared = _prepare_path_view_field(
+        cube,
+        view_spec,
+        current_time_index=current_time_index,
+        evaluator=evaluator,
+        frames=frames,
+    )
+    sampled_values = _sample_with_path_context(prepared.reduced_cube.values, prepared.sampling)
+    vertical_coords = _resolve_path_vertical_coords(prepared, evaluator=evaluator)
+    metadata = deepcopy(prepared.reduced_cube.metadata)
     metadata["source_dims"] = list(cube.dims)
     metadata["sampling"] = {
         "path_kind": "polyline",
-        "sample_count": int(distances.shape[0]),
-        "selected_time_index": int(time_index),
+        "interpolation": "bilinear",
+        "sample_count": int(prepared.sampling.distances.shape[0]),
+        "selected_time_index": int(prepared.sampling.time_index),
     }
-
-    return ResolvedViewField(
-        values=sampled_values,
-        dims=(y_axis_name, x_axis_name),
-        x_axis=_normalize_view_axis(view_spec.get("x_axis"), fallback_name="distance_km"),
-        y_axis=_normalize_view_axis(view_spec.get("y_axis"), fallback_name=y_axis_name),
-        x_coords=np.asarray(distances, dtype=float),
-        y_coords=np.asarray(y_coords, dtype=float),
-        units=reduced_cube.units,
+    return _build_path_resolved_view_field(
+        sampled_values,
+        prepared,
+        vertical_coords=vertical_coords,
+        units=prepared.reduced_cube.units,
         metadata=metadata,
     )
 
@@ -1202,6 +1969,14 @@ def _resolve_view_field(
     y_axis_kind = _view_axis_kind(view_spec.get("y_axis"))
     if "path_coord" in {x_axis_kind, y_axis_kind}:
         return _resolve_path_view_field(
+            cube,
+            view_spec,
+            current_time_index=current_time_index,
+            evaluator=evaluator,
+            frames=frames,
+        )
+    if "derived_coord" in {x_axis_kind, y_axis_kind}:
+        return _resolve_time_vertical_view_field(
             cube,
             view_spec,
             current_time_index=current_time_index,
@@ -1353,6 +2128,8 @@ def _render_vector(
     v_field: np.ndarray,
     *,
     draw: dict[str, Any],
+    x_coords: np.ndarray | None = None,
+    y_coords: np.ndarray | None = None,
 ) -> None:
     if u_field.shape != v_field.shape:
         raise ValueError(
@@ -1362,7 +2139,11 @@ def _render_vector(
     style = draw.get("style", {})
     stride = int(style.get("stride") or 1)
     sample = (slice(None, None, stride), slice(None, None, stride))
-    y_coords, x_coords = np.mgrid[0 : u_field.shape[0], 0 : u_field.shape[1]]
+    mesh = _coordinate_mesh(u_field, x_coords=x_coords, y_coords=y_coords)
+    if mesh is None:
+        y_mesh, x_mesh = np.mgrid[0 : u_field.shape[0], 0 : u_field.shape[1]]
+    else:
+        x_mesh, y_mesh = mesh
     quiver_kwargs: dict[str, Any] = {
         "angles": "xy",
         "alpha": float(draw.get("alpha", 1.0)),
@@ -1373,8 +2154,8 @@ def _render_vector(
     if style.get("scale") is not None:
         quiver_kwargs["scale"] = float(style["scale"])
     axis.quiver(
-        x_coords[sample],
-        y_coords[sample],
+        x_mesh[sample],
+        y_mesh[sample],
         u_field[sample],
         v_field[sample],
         **quiver_kwargs,
@@ -1409,7 +2190,7 @@ def _render_layer_target_ids(render_layer: dict[str, Any]) -> list[str]:
     kind = str(draw.get("kind") or "") if isinstance(draw, dict) else ""
     if kind == "vector":
         target_ids: list[str] = []
-        for key in ("u_layer_id", "v_layer_id"):
+        for key in ("u_layer_id", "v_layer_id", "vertical_layer_id"):
             value = render_layer.get(key)
             if isinstance(value, str) and value.strip() and value not in target_ids:
                 target_ids.append(value)
@@ -1612,6 +2393,7 @@ class FigureEvaluator:
         self.diagnostic_cache: dict[tuple[str, int, str], tuple[np.ndarray, str | None]] = {}
         self.horizontal_coord_cache: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] = {}
         self.mass_height_cache: dict[tuple[str, int], np.ndarray] = {}
+        self.mass_pressure_cache: dict[tuple[str, int], np.ndarray] = {}
         self.layer_cube_cache: dict[tuple[str, int | None], FieldCube] = {}
         self.time_cube_cache: dict[str, FieldCube] = {}
 
@@ -1726,6 +2508,33 @@ class FigureEvaluator:
             payload = 0.5 * (geopotential[:-1] + geopotential[1:]) / 9.81
 
         self.mass_height_cache[key] = payload
+        return payload
+
+    def load_mass_pressure(
+        self,
+        frame: dict[str, Any],
+    ) -> np.ndarray:
+        key = (posix_path(frame["path"]), int(frame["time_index"]))
+        cached = self.mass_pressure_cache.get(key)
+        if cached is not None:
+            return cached
+
+        with Dataset(frame["path"]) as dataset:
+            p = dataset.variables.get("P")
+            pb = dataset.variables.get("PB")
+            if p is None or pb is None:
+                raise KeyError("pressure_hpa views require P and PB in wrfout files")
+            p_raw = p[int(frame["time_index"])] if p.ndim >= 4 else p[:]
+            pb_raw = pb[int(frame["time_index"])] if pb.ndim >= 4 else pb[:]
+            pressure = np.asarray(np.ma.filled(p_raw, np.nan), dtype=float) + np.asarray(
+                np.ma.filled(pb_raw, np.nan),
+                dtype=float,
+            )
+            if pressure.ndim != 3:
+                raise ValueError(f"Expected 3D pressure field, received ndim={pressure.ndim}")
+            payload = pressure / 100.0
+
+        self.mass_pressure_cache[key] = payload
         return payload
 
     def load_diagnostic(
@@ -2036,6 +2845,7 @@ def run_figure_request(
             )
             sidecar_path = output_path.with_suffix(".json") if sidecar_enabled else None
 
+            resolved_view = deepcopy(view_spec)
             resolved_layers: list[dict[str, Any]] = []
             layer_summaries: dict[str, dict[str, float | None]] = {}
 
@@ -2064,14 +2874,15 @@ def run_figure_request(
             for render_layer in figure_spec.get("layers", []):
                 draw = render_layer["draw"]
                 if str(draw.get("kind") or "") == "vector":
-                    if not map_view:
-                        raise ValueError(
-                            f"draw.kind=vector is currently only supported for map views: figure={figure_spec['figure_id']}"
-                        )
+                    axis_projection = _resolve_vector_axis_projection(draw, view_spec=view_spec)
                     u_layer_id = str(render_layer["u_layer_id"])
                     v_layer_id = str(render_layer["v_layer_id"])
-                    u_cube = evaluator.evaluate_layer_cube(u_layer_id, target)
-                    v_cube = evaluator.evaluate_layer_cube(v_layer_id, target)
+                    if map_view:
+                        u_cube = evaluator.evaluate_layer_cube(u_layer_id, target)
+                        v_cube = evaluator.evaluate_layer_cube(v_layer_id, target)
+                    else:
+                        u_cube = evaluator.build_time_cube(u_layer_id)
+                        v_cube = evaluator.build_time_cube(v_layer_id)
                     u_view = _resolve_view_field(
                         u_cube,
                         view_spec,
@@ -2086,44 +2897,135 @@ def run_figure_request(
                         evaluator=evaluator,
                         frames=group,
                     )
-                    u_field = u_view.values
-                    v_field = v_view.values
-                    magnitude = np.sqrt(u_field**2 + v_field**2)
-                    u_summary = _summary(u_field)
-                    v_summary = _summary(v_field)
+                    u_view = _coerce_same_shape_view(u_view, expected=u_view, label="u_layer")
+                    v_view = _coerce_same_shape_view(v_view, expected=u_view, label="v_layer")
+                    component_views: dict[str, ResolvedViewField] = {}
+                    if axis_projection["kind"] == MAP_VECTOR_PROJECTION_KIND:
+                        if render_layer.get("vertical_layer_id") is not None:
+                            raise ValueError("Map-view vector layers do not use vertical_layer_id")
+                        component_views["u"] = u_view
+                        component_views["v"] = v_view
+                    elif axis_projection["kind"] == PATH_SECTION_VECTOR_PROJECTION_KIND:
+                        if not _is_path_view(view_spec):
+                            raise ValueError(
+                                f"draw.style.axis_projection.kind={PATH_SECTION_VECTOR_PROJECTION_KIND} "
+                                f"is only valid for path views: figure={figure_spec['figure_id']}"
+                            )
+                        for component_name in {axis_projection["x_component"], axis_projection["y_component"]}:
+                            if component_name in {"path_tangent", "path_normal"}:
+                                component_views[component_name] = _resolve_path_projected_horizontal_component(
+                                    u_cube,
+                                    v_cube,
+                                    view_spec,
+                                    component=component_name,
+                                    current_time_index=current_time_index,
+                                    evaluator=evaluator,
+                                    frames=group,
+                                )
+                            elif component_name == "vertical":
+                                vertical_layer_id = render_layer.get("vertical_layer_id")
+                                if not isinstance(vertical_layer_id, str) or not vertical_layer_id.strip():
+                                    raise ValueError(
+                                        "Path-section vector layers using vertical axis_projection "
+                                        "require vertical_layer_id"
+                                    )
+                                vertical_cube = evaluator.build_time_cube(str(vertical_layer_id))
+                                vertical_view = _resolve_view_field(
+                                    vertical_cube,
+                                    view_spec,
+                                    current_time_index=current_time_index,
+                                    evaluator=evaluator,
+                                    frames=group,
+                                )
+                                component_views["vertical"] = _coerce_same_shape_view(
+                                    vertical_view,
+                                    expected=u_view,
+                                    label="vertical_layer",
+                                )
+                            else:
+                                raise ValueError(
+                                    f"Unsupported path-section axis_projection component: {component_name}"
+                                )
+                    else:
+                        raise ValueError(
+                            f"Unsupported vector axis_projection kind: {axis_projection['kind']}"
+                        )
+
+                    x_view = component_views[axis_projection["x_component"]]
+                    y_view = _coerce_same_shape_view(
+                        component_views[axis_projection["y_component"]],
+                        expected=x_view,
+                        label="vector_component",
+                    )
+                    x_field = x_view.values
+                    y_field = y_view.values
+                    resolved_view["x_axis"] = deepcopy(x_view.x_axis)
+                    resolved_view["y_axis"] = deepcopy(x_view.y_axis)
+                    magnitude = np.sqrt(x_field**2 + y_field**2)
+                    u_summary = _summary(u_view.values)
+                    v_summary = _summary(v_view.values)
+                    x_summary = _summary(x_field)
+                    y_summary = _summary(y_field)
                     magnitude_summary = _summary(magnitude)
                     layer_summaries[u_layer_id] = u_summary
                     layer_summaries[v_layer_id] = v_summary
-                    resolved_layers.append(
-                        {
-                            "u_layer_id": u_layer_id,
-                            "v_layer_id": v_layer_id,
-                            "style_id": render_layer.get("style_id"),
-                            "u_expr": str(layer_defs[u_layer_id].get("expr") or ""),
-                            "v_expr": str(layer_defs[v_layer_id].get("expr") or ""),
-                            "u_source_kind": str(
-                                layer_defs[u_layer_id].get("source", {}).get("kind") or "wrf_native"
-                            ),
-                            "v_source_kind": str(
-                                layer_defs[v_layer_id].get("source", {}).get("kind") or "wrf_native"
-                            ),
-                            "u_source": deepcopy(layer_defs[u_layer_id].get("source") or {}),
-                            "v_source": deepcopy(layer_defs[v_layer_id].get("source") or {}),
-                            "u_units": layer_defs[u_layer_id].get("units"),
-                            "v_units": layer_defs[v_layer_id].get("units"),
-                            "magnitude_units": (
-                                layer_defs[u_layer_id].get("units")
-                                if layer_defs[u_layer_id].get("units") == layer_defs[v_layer_id].get("units")
-                                else None
-                            ),
-                            "u_summary": u_summary,
-                            "v_summary": v_summary,
-                            "magnitude_summary": magnitude_summary,
-                            "draw": deepcopy(draw),
-                        }
-                    )
+                    resolved_layer = {
+                        "u_layer_id": u_layer_id,
+                        "v_layer_id": v_layer_id,
+                        "style_id": render_layer.get("style_id"),
+                        "u_expr": str(layer_defs[u_layer_id].get("expr") or ""),
+                        "v_expr": str(layer_defs[v_layer_id].get("expr") or ""),
+                        "u_source_kind": str(
+                            layer_defs[u_layer_id].get("source", {}).get("kind") or "wrf_native"
+                        ),
+                        "v_source_kind": str(
+                            layer_defs[v_layer_id].get("source", {}).get("kind") or "wrf_native"
+                        ),
+                        "u_source": deepcopy(layer_defs[u_layer_id].get("source") or {}),
+                        "v_source": deepcopy(layer_defs[v_layer_id].get("source") or {}),
+                        "u_units": layer_defs[u_layer_id].get("units"),
+                        "v_units": layer_defs[v_layer_id].get("units"),
+                        "u_summary": u_summary,
+                        "v_summary": v_summary,
+                        "axis_projection": deepcopy(axis_projection),
+                        "x_component_units": x_view.units,
+                        "y_component_units": y_view.units,
+                        "x_component_summary": x_summary,
+                        "y_component_summary": y_summary,
+                        "magnitude_units": x_view.units if x_view.units == y_view.units else None,
+                        "magnitude_summary": magnitude_summary,
+                        "draw": deepcopy(draw),
+                    }
+                    vertical_layer_id = render_layer.get("vertical_layer_id")
+                    if (
+                        isinstance(vertical_layer_id, str)
+                        and vertical_layer_id.strip()
+                        and "vertical" in {axis_projection["x_component"], axis_projection["y_component"]}
+                    ):
+                        vertical_layer_id = str(vertical_layer_id)
+                        layer_summaries[vertical_layer_id] = _summary(component_views["vertical"].values)
+                        resolved_layer.update(
+                            {
+                                "vertical_layer_id": vertical_layer_id,
+                                "vertical_expr": str(layer_defs[vertical_layer_id].get("expr") or ""),
+                                "vertical_source_kind": str(
+                                    layer_defs[vertical_layer_id].get("source", {}).get("kind") or "wrf_native"
+                                ),
+                                "vertical_source": deepcopy(layer_defs[vertical_layer_id].get("source") or {}),
+                                "vertical_units": layer_defs[vertical_layer_id].get("units"),
+                                "vertical_summary": layer_summaries[vertical_layer_id],
+                            }
+                        )
+                    resolved_layers.append(resolved_layer)
                     if not dry_run and axis is not None:
-                        _render_vector(axis, u_field, v_field, draw=draw)
+                        _render_vector(
+                            axis,
+                            x_field,
+                            y_field,
+                            draw=draw,
+                            x_coords=x_view.x_coords,
+                            y_coords=x_view.y_coords,
+                        )
                     continue
 
                 layer_id = str(render_layer["layer_id"])
@@ -2140,6 +3042,8 @@ def run_figure_request(
                 )
                 field = resolved_field.values
                 units = resolved_field.units
+                resolved_view["x_axis"] = deepcopy(resolved_field.x_axis)
+                resolved_view["y_axis"] = deepcopy(resolved_field.y_axis)
                 layer_summaries[layer_id] = _summary(field)
                 resolved_layers.append(
                     {
@@ -2176,7 +3080,7 @@ def run_figure_request(
                 selected_frames=group,
                 current_frame=current_frame,
                 title=title,
-                view=deepcopy(view_spec),
+                view=resolved_view,
                 view_id=view_id,
                 resolved_layers=resolved_layers,
                 layer_summaries=layer_summaries,

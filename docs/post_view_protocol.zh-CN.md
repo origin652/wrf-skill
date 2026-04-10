@@ -2,9 +2,16 @@
 
 状态：提案阶段。这里描述的不是当前可直接运行的 `schema_version=2` 协议。
 
+这个仓库当前阶段 6 的结论是：继续把可运行合同维持在 `schema_version=2`，暂时不发布 `schema_version=3`。所以这份文件仍然只是未来方向的设计草案。
+
+这份草案里的部分想法已经落进了当前 v2 runtime，例如 `view_defs`、`time-x`、`time-y`、`time-height`、`time-pressure`、更丰富的 selectors、`distance_km` 路径剖面，以及显式的路径截面矢量投影。
+这篇文档现在描述的仍然是超出当前 v2 校验范围之后的未来方向，尤其是更通用的任意两轴组合和截面矢量行为。
+
+当前可直接运行的行为见 `docs/post_runtime_v2.zh-CN.md`。
+
 ## 目标
 
-现在的后处理 runtime 默认每个 layer 最终都必须是二维 `south_north x west_east` 场。
+这份草案最初的出发点，是更早期的后处理 runtime 基本会把每个 layer 都压成二维 `south_north x west_east` 场。
 这足够支撑地图类产品，但会卡住这些需求：
 
 - 时间-高度截面
