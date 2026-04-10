@@ -10,40 +10,38 @@ Use this skill when the user needs forcing data for a configured project.
 ## Workflow
 
 1. Read `runs/<project>/simulation_spec.json` and `project.json`.
-2. Use `scripts/wrf_task.py start --step wrf-data` as the default user-facing entry point.
+2. Use `scripts/wrf.py data` as the default user-facing entry point.
 3. For implementation details, let the worker call `scripts/wrf_data.py`.
 4. Prefer reusing local files when the user already has forcing data. `--base-url file:///...` is valid for local mirrors.
 5. Write or update `data_manifest.json` and the retry shell script in the project data directory.
 6. Register forcing files and manifest in `project.json` when the worker finishes.
-7. Use `scripts/wrf_task.py status` and `logs` for progress follow-up instead of keeping the same AI turn blocked.
+7. Use `scripts/wrf.py status` and `scripts/wrf.py logs` for progress follow-up instead of keeping the same AI turn blocked.
 
 ## Examples
 
 Start the async data task:
 ```bash
-python3 scripts/wrf_task.py start --project-name demo --step wrf-data
+python3 scripts/wrf.py data --project-name demo
 ```
 
 Tune downloader worker settings:
 ```bash
-python3 scripts/wrf_task.py start \
+python3 scripts/wrf.py data \
   --project-name demo \
-  --step wrf-data \
   --task-kwargs-json '{"max_workers": 4}'
 ```
 
 Use a local mirror instead of the public source:
 ```bash
-python3 scripts/wrf_task.py start \
+python3 scripts/wrf.py data \
   --project-name demo \
-  --step wrf-data \
   --task-kwargs-json '{"base_url": "file:///mnt/data/gfs-mirror", "max_workers": 1}'
 ```
 
 Check progress and logs:
 ```bash
-python3 scripts/wrf_task.py status --project-name demo
-python3 scripts/wrf_task.py logs --project-name demo --lines 80
+python3 scripts/wrf.py status --project-name demo
+python3 scripts/wrf.py logs --project-name demo --lines 80
 ```
 
 ## Notes
@@ -60,6 +58,7 @@ python3 scripts/wrf_task.py logs --project-name demo --lines 80
 
 ## Files
 
+- `scripts/wrf.py`
 - `scripts/wrf_task.py`
 - `scripts/wrf_data.py`
 - `scripts/download_gfs.py`

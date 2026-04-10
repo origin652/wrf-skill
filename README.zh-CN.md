@@ -173,17 +173,21 @@ AI 只能使用你已经通过文件和命令暴露出来的 HPC 信息。
 最小本地流程如下：
 
 ```bash
-python3 scripts/wrf_init.py --project-name demo
-python3 scripts/wrf_config.py \
+python3 scripts/wrf.py init --project-name demo
+python3 scripts/wrf.py config \
   --project-name demo \
   --request-text "East China, GFS, 2024-07-20 00:00 to 2024-07-20 12:00, local" \
   --run-mode local
-python3 scripts/wrf_task.py start --project-name demo --step wrf-data
-python3 scripts/wrf_task.py start --project-name demo --step wrf-wps
-python3 scripts/wrf_task.py start --project-name demo --step wrf-run
+python3 scripts/wrf.py data --project-name demo
+python3 scripts/wrf.py wps --project-name demo
+python3 scripts/wrf.py run --project-name demo
 ```
 
 如果你这次只想先验证预处理链路，跑到 `wrf-wps` 就可以停。
+
+`scripts/wrf.py` 现在是默认推荐的用户入口。原来的
+`scripts/wrf_init.py`、`scripts/wrf_config.py`、`scripts/wrf_task.py` 和
+`scripts/wrf_post.py` 仍然保留，作为兼容路径继续可用。
 
 ## 后处理协议
 

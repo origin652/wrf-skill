@@ -10,11 +10,12 @@ Use this skill when a user wants to create a new WRF run directory or validate t
 ## Workflow
 
 1. Read `config/wrf_env.json`.
-2. If not in `dry-run`, run `scripts/check_env.sh`.
-3. Let `check_env.sh` validate filesystem paths, core WRF/WPS executables, support files, and local runtime config sections.
-4. Create `runs/<project>/{data,wps,wrf,output,logs}`.
-5. Seed `project.json`, `simulation_spec.json`, and namelist templates.
-6. Set the project status to `created` or `env_checked`.
+2. Prefer `scripts/wrf.py init` as the public entry point. `scripts/wrf_init.py` remains the implementation and compatibility entry.
+3. If not in `dry-run`, run `scripts/check_env.sh`.
+4. Let `check_env.sh` validate filesystem paths, core WRF/WPS executables, support files, and local runtime config sections.
+5. Create `runs/<project>/{data,wps,wrf,output,logs}`.
+6. Seed `project.json`, `simulation_spec.json`, and namelist templates.
+7. Set the project status to `created` or `env_checked`.
 
 ## Notes
 
@@ -28,6 +29,7 @@ Use this skill when a user wants to create a new WRF run directory or validate t
 
 ## Files
 
+- `scripts/wrf.py`
 - `scripts/project_state.py`
 - `scripts/wrf_init.py`
 - `scripts/check_env.sh`

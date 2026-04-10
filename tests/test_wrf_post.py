@@ -2667,6 +2667,111 @@ class FigureRenderingTests(unittest.TestCase):
 
 
 class WrfPostProjectTests(unittest.TestCase):
+    def test_run_postprocess_recovers_from_prior_post_failure(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_post_recover_after_failure")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "demo" / "wrf" / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00"],
+            t2=[np.array([[300.0, 301.0], [302.0, 303.0]])],
+            u10=[np.array([[1.0, 2.0], [3.0, 4.0]])],
+            v10=[np.array([[2.0, 3.0], [4.0, 5.0]])],
+            rainc=[np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2))],
+            hgt=np.array([[100.0, 150.0], [200.0, 250.0]]),
+        )
+        project_root = create_project(runs_dir, "demo", [wrfout_path])
+
+        failing_post_spec_path = project_root / "post_spec.fail.json"
+        failing_post_spec_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "project_name": "demo",
+                    "style_defs": build_style_defs(),
+                    "layer_defs": build_layer_defs(),
+                    "figures": [
+                        {
+                            "figure_id": "surface_temperature",
+                            "selectors": {"time_indices": [0]},
+                            "render": {"title": "Surface Temperature", "dpi": 120},
+                            "output": {
+                                "subdir": "plots",
+                                "file_stem": "surface-temperature",
+                                "sidecar_json": True,
+                                "overwrite": False,
+                            },
+                            "layers": [
+                                {
+                                    "layer_id": "t2_c",
+                                    "style_id": "temperature_raster",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        first_payload = run_postprocess("demo", runs_dir=runs_dir, post_spec_path=failing_post_spec_path)
+        self.assertEqual(len(first_payload["artifacts"]), 1)
+
+        with self.assertRaises(FileExistsError):
+            run_postprocess("demo", runs_dir=runs_dir, post_spec_path=failing_post_spec_path)
+
+        failed_state = load_json(project_root / "project.json")
+        self.assertEqual(failed_state["status"], "failed")
+        self.assertEqual(failed_state["current_step"], "wrf-post")
+        self.assertEqual(failed_state["last_error"]["code"], "WRF_POST_FAILED")
+
+        recovery_post_spec_path = project_root / "post_spec.recover.json"
+        recovery_post_spec_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "project_name": "demo",
+                    "style_defs": build_style_defs(),
+                    "layer_defs": build_layer_defs(),
+                    "figures": [
+                        {
+                            "figure_id": "surface_temperature_recover",
+                            "selectors": {"time_indices": [0]},
+                            "render": {"title": "Surface Temperature Recover", "dpi": 120},
+                            "output": {
+                                "subdir": "plots",
+                                "file_stem": "surface-temperature-recover",
+                                "sidecar_json": True,
+                                "overwrite": False,
+                            },
+                            "layers": [
+                                {
+                                    "layer_id": "t2_c",
+                                    "style_id": "temperature_raster",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        recovery_payload = run_postprocess("demo", runs_dir=runs_dir, post_spec_path=recovery_post_spec_path)
+
+        self.assertEqual(len(recovery_payload["artifacts"]), 1)
+        recovered_state = load_json(project_root / "project.json")
+        self.assertEqual(recovered_state["status"], "completed")
+        self.assertEqual(recovered_state["current_step"], "wrf-post")
+        self.assertIsNone(recovered_state["last_error"])
+        self.assertEqual(len(recovered_state["artifacts"]["plots"]), 2)
+
     def test_run_postprocess_registers_current_figure_artifacts(self) -> None:
         runs_dir = make_test_dir("_test_wrf_post_v2_project")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))

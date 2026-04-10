@@ -10,11 +10,12 @@ This plugin skill is a thin wrapper that exposes the canonical workspace skill a
 ## Workflow
 
 1. Open `.claude/skills/wrf-wps/SKILL.md` first and follow it as the authoritative workflow.
-2. Use repo-root `scripts/wrf_task.py start --step wrf-wps` for execution.
+2. Prefer repo-root `scripts/wrf.py wps` for execution.
 3. Treat `runs/<project>/project.json` and `logs/` as the persisted WPS state.
 
 ## Files
 
 - `.claude/skills/wrf-wps/SKILL.md`
+- `scripts/wrf.py`
 - `scripts/wrf_task.py`
 - `scripts/wrf_wps.py`

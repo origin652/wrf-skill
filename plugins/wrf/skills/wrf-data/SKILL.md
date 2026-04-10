@@ -10,12 +10,13 @@ This plugin skill is a thin wrapper that exposes the canonical workspace skill a
 ## Workflow
 
 1. Open `.claude/skills/wrf-data/SKILL.md` first and follow it as the authoritative workflow.
-2. Use repo-root `scripts/wrf_task.py start --step wrf-data` as the normal entry point.
+2. Prefer repo-root `scripts/wrf.py data` as the normal entry point.
 3. Keep data artifacts and manifest updates under `runs/<project>/`.
 
 ## Files
 
 - `.claude/skills/wrf-data/SKILL.md`
+- `scripts/wrf.py`
 - `scripts/wrf_task.py`
 - `scripts/wrf_data.py`
 - `scripts/download_gfs.py`

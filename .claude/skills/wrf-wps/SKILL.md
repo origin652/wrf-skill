@@ -10,28 +10,28 @@ Use this skill when forcing data and namelists are ready and the user wants WPS 
 ## Workflow
 
 1. Read `project.json` to confirm the project is at least `configured` and has data inputs ready or partially ready.
-2. Use `scripts/wrf_task.py start --step wrf-wps` as the default user-facing entry point.
+2. Use `scripts/wrf.py wps` as the default user-facing entry point.
 3. In local mode the detached worker executes `scripts/wrf_wps.py`; in HPC mode the task layer runs `admission -> sync -> adapter.render_job -> adapter.submit -> status/query -> collect`.
 4. Save logs under `runs/<project>/logs/` and task logs under `runs/<project>/tasks/<task-id>/`.
 5. Register `met_em*` artifacts and move the project to `wps_ready` when complete.
-6. Use `status` and `logs` to report progress in later turns.
+6. Use `scripts/wrf.py status` and `scripts/wrf.py logs` to report progress in later turns.
 
 ## Examples
 
 Start WPS asynchronously:
 ```bash
-python3 scripts/wrf_task.py start --project-name demo --step wrf-wps
+python3 scripts/wrf.py wps --project-name demo
 ```
 
 For a small test case, block until WPS finishes:
 ```bash
-python3 scripts/wrf_task.py start --project-name demo --step wrf-wps --wait
+python3 scripts/wrf.py wps --project-name demo --wait
 ```
 
 Inspect WPS progress:
 ```bash
-python3 scripts/wrf_task.py status --project-name demo
-python3 scripts/wrf_task.py logs --project-name demo --lines 120
+python3 scripts/wrf.py status --project-name demo
+python3 scripts/wrf.py logs --project-name demo --lines 120
 ```
 
 ## Notes
@@ -42,6 +42,7 @@ python3 scripts/wrf_task.py logs --project-name demo --lines 120
 
 ## Files
 
+- `scripts/wrf.py`
 - `scripts/wrf_task.py`
 - `scripts/wrf_wps.py`
 - `runs/<project>/project.json`

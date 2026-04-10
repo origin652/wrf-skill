@@ -10,9 +10,9 @@ Use this skill when the user asks for an end-to-end WRF workflow from a natural-
 ## Workflow
 
 1. If the current directory does not already contain a compatible WRF workspace and the user wants one created, use `wrf-workspace-init` first to generate a workspace, then continue from that workspace root.
-2. Create the project with `scripts/wrf_init.py` if it does not exist.
+2. Prefer `scripts/wrf.py` as the public workflow entry point. Create the project with `scripts/wrf.py init` if it does not exist.
 3. Treat `simulation_spec.json` as the authoritative scientific config. The preferred format is `schema_version=2` with `timing`, `execution`, `wps`, `model`, and `experimental`.
-4. Use `scripts/wrf_config.py` to turn the request into `simulation_spec.json`, `namelist.wps`, and `namelist.input`.
+4. Use `scripts/wrf.py config` to turn the request into `simulation_spec.json`, `namelist.wps`, and `namelist.input`.
 5. For simple cases, use presets and `--request-text`. For research-grade cases, prefer `--spec-fragment-json` plus targeted `--override`.
 6. If `run_mode=hpc`, rely on `wrf-config` admission before final config is written, and treat `project.json.execution.access_mode` as either `login` or `ssh`.
 7. Runtime selection is config-driven:
@@ -20,13 +20,14 @@ Use this skill when the user asks for an end-to-end WRF workflow from a natural-
    - Local WPS execution: `local.wps_runtime.mode = project | custom_safe`
    - HPC WRF execution: `hpc.runtime.mode = project | remote_run_dir | custom`
    - HPC WPS execution: `hpc.wps_runtime.mode = project | remote_wps_dir | custom`
-8. Start long steps through `scripts/wrf_task.py start`:
-   - `wrf-data`
-   - `wrf-wps`
-   - `wrf-run`
+8. Start long steps through `scripts/wrf.py`:
+   - `data`
+   - `wps`
+   - `run`
 9. For long-running work, return immediately after `start` unless the user explicitly wants blocking wait.
-10. For follow-up questions such as "现在到哪了", use `scripts/wrf_task.py status` and `scripts/wrf_task.py logs`.
-11. If an HPC run is terminal and remote outputs still need to be registered locally, use `scripts/wrf_task.py collect`.
+10. For follow-up questions such as "现在到哪了", use `scripts/wrf.py status` and `scripts/wrf.py logs`.
+11. If an HPC run is terminal and remote outputs still need to be registered locally, use `scripts/wrf.py collect`.
+12. The legacy direct entries `scripts/wrf_init.py`, `scripts/wrf_config.py`, `scripts/wrf_task.py`, and `scripts/wrf_post.py` remain supported for compatibility, but new examples should prefer `scripts/wrf.py`.
 
 ## Local Runtime Notes
 
@@ -43,17 +44,17 @@ Use this skill when the user asks for an end-to-end WRF workflow from a natural-
 
 Local end-to-end:
 ```bash
-python3 scripts/wrf_init.py --project-name demo
-python3 scripts/wrf_config.py --project-name demo --request-text "East China, GFS, 2024-07-20 00:00 to 2024-07-20 12:00, local" --run-mode local
-python3 scripts/wrf_task.py start --project-name demo --step wrf-data
-python3 scripts/wrf_task.py start --project-name demo --step wrf-wps
-python3 scripts/wrf_task.py start --project-name demo --step wrf-run
+python3 scripts/wrf.py init --project-name demo
+python3 scripts/wrf.py config --project-name demo --request-text "East China, GFS, 2024-07-20 00:00 to 2024-07-20 12:00, local" --run-mode local
+python3 scripts/wrf.py data --project-name demo
+python3 scripts/wrf.py wps --project-name demo
+python3 scripts/wrf.py run --project-name demo
 ```
 
 Research-grade local config:
 ```bash
-python3 scripts/wrf_init.py --project-name demo
-python3 scripts/wrf_config.py \
+python3 scripts/wrf.py init --project-name demo
+python3 scripts/wrf.py config \
   --project-name demo \
   --domain-preset east_china \
   --domain-preset shanghai_inner \
@@ -62,9 +63,9 @@ python3 scripts/wrf_config.py \
   --override domains.1.physics.cu_physics=0 \
   --override domains.1.geog_data_res=default+30s \
   --override model.namelist_input.domains.parent_time_step_ratio=[1,3]
-python3 scripts/wrf_task.py start --project-name demo --step wrf-data
-python3 scripts/wrf_task.py start --project-name demo --step wrf-wps
-python3 scripts/wrf_task.py start --project-name demo --step wrf-run
+python3 scripts/wrf.py data --project-name demo
+python3 scripts/wrf.py wps --project-name demo
+python3 scripts/wrf.py run --project-name demo
 ```
 
 Local `custom_safe` runtime config excerpt:
@@ -90,16 +91,16 @@ Local `custom_safe` runtime config excerpt:
 
 HPC via login node: use a config whose `hpc.access_mode=login`. The generic example is `config/wrf_env.hpc.example.json`; copy it and fill in cluster-specific values.
 ```bash
-python3 scripts/wrf_config.py --project-name demo --config config/wrf_env.json --run-mode hpc --spec-fragment-json /tmp/hpc_case.json
-python3 scripts/wrf_task.py start --project-name demo --step wrf-wps --config config/wrf_env.json
-python3 scripts/wrf_task.py start --project-name demo --step wrf-run --config config/wrf_env.json
-python3 scripts/wrf_task.py status --project-name demo --config config/wrf_env.json
+python3 scripts/wrf.py config --project-name demo --config config/wrf_env.json --run-mode hpc --spec-fragment-json /tmp/hpc_case.json
+python3 scripts/wrf.py wps --project-name demo --config config/wrf_env.json
+python3 scripts/wrf.py run --project-name demo --config config/wrf_env.json
+python3 scripts/wrf.py status --project-name demo --config config/wrf_env.json
 ```
 
 HPC via SSH to a login node: use a config whose `hpc.access_mode=ssh`.
 ```bash
-python3 scripts/wrf_task.py logs --project-name demo --config config/wrf_env.json --lines 80
-python3 scripts/wrf_task.py collect --project-name demo --config config/wrf_env.json
+python3 scripts/wrf.py logs --project-name demo --lines 80
+python3 scripts/wrf.py collect --project-name demo --config config/wrf_env.json
 ```
 
 ## Rules
@@ -115,6 +116,7 @@ python3 scripts/wrf_task.py collect --project-name demo --config config/wrf_env.
 
 ## Files
 
+- `scripts/wrf.py`
 - `scripts/wrf_init.py`
 - `scripts/spec_utils.py`
 - `scripts/wrf_config.py`

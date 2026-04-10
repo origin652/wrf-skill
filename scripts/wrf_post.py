@@ -22,6 +22,7 @@ try:
         record_error,
         register_artifact,
         save_project,
+        transition,
     )
 except ImportError:  # pragma: no cover
     from .plot_wrfout import (
@@ -44,6 +45,7 @@ except ImportError:  # pragma: no cover
         record_error,
         register_artifact,
         save_project,
+        transition,
     )
 
 
@@ -150,6 +152,30 @@ def load_post_spec(
     return default_post_spec(project_name), None
 
 
+def _recover_status_after_post_success(state: dict[str, Any]) -> None:
+    clear_error(state)
+
+    if state.get("status") != "failed":
+        state["current_step"] = "wrf-post"
+        return
+
+    artifacts = state.get("artifacts", {})
+    if artifacts.get("wrfout_files"):
+        next_status = "completed"
+    elif artifacts.get("wrfinput_files"):
+        next_status = "real_ready"
+    elif artifacts.get("met_em_files"):
+        next_status = "wps_ready"
+    elif artifacts.get("forcing_files"):
+        next_status = "data_ready"
+    elif artifacts.get("namelist_wps") or artifacts.get("namelist_input"):
+        next_status = "configured"
+    else:
+        next_status = "created"
+
+    transition(state, next_status, current_step="wrf-post", allow_retry=True)
+
+
 def run_postprocess(
     project_name: str,
     *,
@@ -219,7 +245,7 @@ def run_postprocess(
                 "artifacts": generated,
             }
 
-        clear_error(state)
+        _recover_status_after_post_success(state)
         save_project(state, project_json)
         write_log(log_path, lines)
         return {

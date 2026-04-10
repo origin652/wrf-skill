@@ -14,19 +14,20 @@ Use this skill when the user wants to define or update domains, timing, physics 
 1. Read `runs/<project>/project.json` and `simulation_spec.json`.
 2. If `project.json.execution.active_task.state` is `queued` or `running`, do not mutate config.
 3. Normalize the current spec to the v2 structured view before making decisions.
-4. For simple requests, use presets and `--request-text`. For research-grade requests, prefer `--spec-fragment-json` plus targeted `--override`.
-5. Update the temporary spec from presets, request text, structured fragments, and supported override paths.
-6. Use per-domain overrides when needed, for example `domains.<index>.physics.*` and `domains.<index>.geog_data_res`.
-7. Validate through `scripts/render_config.py`. This now checks structured spec semantics and rendered namelist validity.
-8. If `run_mode=hpc`, let `scripts/wrf_config.py` run admission before writing final config.
-9. If admission returns `rejected` or `unverified`, stop there and return the decision, reason codes, and alternatives.
-10. If accepted, write `simulation_spec.json`, `namelist.wps`, and `namelist.input`, then reset downstream artifact registration.
+4. Prefer `scripts/wrf.py config` as the public entry point. `scripts/wrf_config.py` remains the implementation and compatibility entry.
+5. For simple requests, use presets and `--request-text`. For research-grade requests, prefer `--spec-fragment-json` plus targeted `--override`.
+6. Update the temporary spec from presets, request text, structured fragments, and supported override paths.
+7. Use per-domain overrides when needed, for example `domains.<index>.physics.*` and `domains.<index>.geog_data_res`.
+8. Validate through `scripts/render_config.py`. This now checks structured spec semantics and rendered namelist validity.
+9. If `run_mode=hpc`, let the config layer run admission before writing final config.
+10. If admission returns `rejected` or `unverified`, stop there and return the decision, reason codes, and alternatives.
+11. If accepted, write `simulation_spec.json`, `namelist.wps`, and `namelist.input`, then reset downstream artifact registration.
 
 ## Examples
 
 Preset-driven local config:
 ```bash
-python3 scripts/wrf_config.py \
+python3 scripts/wrf.py config \
   --project-name demo \
   --domain-preset east_china \
   --physics-preset tropical_cyclone \
@@ -38,7 +39,7 @@ python3 scripts/wrf_config.py \
 
 Research-grade structured config with projection, per-domain physics, and an extra namelist section:
 ```bash
-python3 scripts/wrf_config.py \
+python3 scripts/wrf.py config \
   --project-name demo \
   --domain-preset east_china \
   --domain-preset shanghai_inner \
@@ -54,7 +55,7 @@ python3 scripts/wrf_config.py \
 
 HPC config preview without writing files yet:
 ```bash
-python3 scripts/wrf_config.py \
+python3 scripts/wrf.py config \
   --project-name demo \
   --config config/wrf_env.json \
   --request-text "East China, GFS, 12 hours" \
@@ -64,7 +65,7 @@ python3 scripts/wrf_config.py \
 
 HPC config through the login node or SSH path: the selected config file must set `hpc.access_mode=login` or `hpc.access_mode=ssh`.
 ```bash
-python3 scripts/wrf_config.py \
+python3 scripts/wrf.py config \
   --project-name demo \
   --config config/wrf_env.json \
   --spec-fragment-json /tmp/hpc_case.json \
@@ -91,6 +92,7 @@ python3 scripts/wrf_config.py \
 - `config/simulation_schema.json`
 - `config/physics_schemes.json`
 - `config/domains_presets.json`
+- `scripts/wrf.py`
 - `scripts/spec_utils.py`
 - `scripts/wrf_config.py`
 - `scripts/render_config.py`

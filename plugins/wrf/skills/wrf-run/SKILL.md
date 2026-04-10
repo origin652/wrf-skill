@@ -10,12 +10,13 @@ This plugin skill is a thin wrapper that exposes the canonical workspace skill a
 ## Workflow
 
 1. Open `.claude/skills/wrf-run/SKILL.md` first and follow it as the authoritative workflow.
-2. Use repo-root `scripts/wrf_task.py start --step wrf-run` and related status or collect commands.
+2. Prefer repo-root `scripts/wrf.py run` plus the related `status`, `logs`, and `collect` commands.
 3. Keep execution state in `runs/<project>/project.json` and task logs under `runs/<project>/tasks/`.
 
 ## Files
 
 - `.claude/skills/wrf-run/SKILL.md`
+- `scripts/wrf.py`
 - `scripts/wrf_task.py`
 - `scripts/wrf_run.py`
 - `scripts/hpc/`

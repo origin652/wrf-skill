@@ -172,17 +172,21 @@ It cannot automatically:
 A minimal local workflow looks like this:
 
 ```bash
-python3 scripts/wrf_init.py --project-name demo
-python3 scripts/wrf_config.py \
+python3 scripts/wrf.py init --project-name demo
+python3 scripts/wrf.py config \
   --project-name demo \
   --request-text "East China, GFS, 2024-07-20 00:00 to 2024-07-20 12:00, local" \
   --run-mode local
-python3 scripts/wrf_task.py start --project-name demo --step wrf-data
-python3 scripts/wrf_task.py start --project-name demo --step wrf-wps
-python3 scripts/wrf_task.py start --project-name demo --step wrf-run
+python3 scripts/wrf.py data --project-name demo
+python3 scripts/wrf.py wps --project-name demo
+python3 scripts/wrf.py run --project-name demo
 ```
 
 If you only want preprocessing first, stop after `wrf-wps`.
+
+`scripts/wrf.py` is the preferred user-facing entry point. The legacy direct entries
+`scripts/wrf_init.py`, `scripts/wrf_config.py`, `scripts/wrf_task.py`, and
+`scripts/wrf_post.py` remain supported for compatibility.
 
 ## Post-processing Protocol
 
