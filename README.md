@@ -1,298 +1,587 @@
-# WRF Skill for Claude Code and Codex
+# WRF Skill
 
-`wrf-skill` is a workflow layer for people who already have a usable WRF/WPS environment and want Claude Code or Codex to help operate it.
-It is not a WRF/WPS installer, compiler, or full distribution.
+AI-powered workflow tools for running WRF simulations with ease.
 
-[中文说明 / Simplified Chinese](README.zh-CN.md)
+English | [简体中文](README.zh-CN.md)
 
-## What This Repository Does
+---
 
-This repository gives the agent a reusable WRF workflow:
+## What is this?
 
-- initialize a project
-- render `simulation_spec.json`, `namelist.wps`, and `namelist.input`
-- run data, WPS, and WRF steps
-- inspect logs and status
-- support local and optional HPC workflows
+WRF Skill is a workflow toolkit that enables Claude Code and Codex to help you operate the WRF model. If you already have a compiled WRF/WPS environment, this tool allows AI assistants to:
 
-Built-in forcing handlers currently cover `gfs`, `fnl`, and `era5`.
-Other forcing products still require custom integration.
+- 🚀 Quickly initialize simulation projects
+- ⚙️ Automatically generate configuration files (namelist.wps, namelist.input)
+- 📦 Download and prepare meteorological data (GFS, FNL, ERA5)
+- 🔄 Run complete WPS → WRF workflows
+- 📊 Post-process and visualize output results
+- 🖥️ Support both local execution and HPC cluster submission
 
-This repository does not:
+**What this is NOT:** This is not a WRF installer or compilation tool. You need to prepare your own WRF/WPS runtime environment.
 
-- compile WRF or WPS for you
-- download arbitrary new data sources automatically
-- ship full `WPS_GEOG`
-- discover hidden HPC policy by itself
-- allow arbitrary local shell chains
+---
 
-## What You Still Need
+## Installation Guide
 
-Before using this repo, prepare these pieces yourself:
+### System Requirements
 
-- Linux or WSL
-- Python 3.10+
-- compiled WRF and WPS already available on disk
-- required `WPS_GEOG` data and support files
-- your own forcing-data access path
-- if using HPC: scheduler access, login path, and site-specific runtime settings
+#### Required Environment
+- **Operating System**: Linux or WSL2 (Windows Subsystem for Linux 2)
+- **Python**: 3.10 or higher
+- **WRF/WPS**: Compiled and runnable version (WRF 4.x recommended)
+- **Geographic Data**: Complete WPS_GEOG dataset
+- **Storage**: At least 50GB available space (for simulation outputs)
 
-## Recommended Paths
+#### Python Dependencies
+- netCDF4 >= 1.6.0
+- numpy >= 1.24.0
+- matplotlib >= 3.7.0
+- cartopy >= 0.22.0
+- xarray >= 2023.1.0
 
-### Claude Code
-
-This repo already ships Claude-style skills under `.claude/skills/`.
-The simplest path is to open the repository directly in Claude Code.
+### Step 1: Install WRF Skill
 
 ```bash
+# 1. Clone the repository
 git clone https://github.com/origin652/wrf-skill.git
 cd wrf-skill
+
+# 2. Install core dependencies
+pip install -e .
+
+# 3. (Optional) For development or running tests
+pip install -e ".[dev]"
+
+# 4. Verify installation
+python3 scripts/wrf.py --version
+# Should output: wrf-skill v0.1.0
 ```
 
-If you need HPC mode, start from the example config:
+### Step 2: Configure Runtime Environment
+
+#### Local Execution Configuration
+
+Create `config/wrf_env.json` file:
 
 ```bash
+# Copy template (if available) or create manually
+cat > config/wrf_env.json << 'EOF'
+{
+  "wrf_root": "/home/username/WRF",
+  "wps_root": "/home/username/WPS",
+  "geog_data_path": "/data/WPS_GEOG",
+  "runtime": {
+    "mode": "local",
+    "wrf_nproc": 4
+  }
+}
+EOF
+```
+
+**Configuration Explanation:**
+- `wrf_root`: WRF installation directory (containing `main/wrf.exe`)
+- `wps_root`: WPS installation directory (containing `geogrid.exe`, etc.)
+- `geog_data_path`: WPS_GEOG geographic data path
+- `wrf_nproc`: Number of CPU cores for local execution
+
+#### HPC Cluster Configuration
+
+If you want to run on an HPC cluster:
+
+```bash
+# 1. Start from example configuration
 cp config/wrf_env.hpc.example.json config/wrf_env.json
+
+# 2. Edit configuration file
+nano config/wrf_env.json
 ```
 
-Then open this repository in Claude Code.
+**HPC Configuration Example (Slurm):**
 
-### Codex
+```json
+{
+  "wrf_root": "/home/username/WRF",
+  "wps_root": "/home/username/WPS",
+  "geog_data_path": "/data/WPS_GEOG",
+  "hpc": {
+    "backend": "slurm",
+    "remote_host": "login.hpc.university.edu",
+    "remote_project_root": "/scratch/username/wrf-projects",
+    "scheduler_ssh_cmd": ["ssh", "-i", "~/.ssh/id_rsa"],
+    "runtime": {
+      "mode": "mpirun",
+      "wrf_nproc": 48,
+      "partition": "compute",
+      "walltime": "06:00:00",
+      "account": "your_account",
+      "modules": ["intel/2021.4", "openmpi/4.1.1", "netcdf/4.8.1"]
+    }
+  }
+}
+```
 
-For Codex, this repository now ships a repo-local plugin entry as well as the older skill installer.
-If you open this repository directly in Codex, it can discover the bundled plugin from `.agents/plugins/marketplace.json` and load the WRF skills from `plugins/wrf/`.
+**HPC Configuration Explanation:**
+- `backend`: Scheduler type (`slurm` or `pbs`)
+- `remote_host`: HPC login node address
+- `remote_project_root`: Project root directory on cluster
+- `scheduler_ssh_cmd`: SSH connection command (optional, defaults to `ssh`)
+- `wrf_nproc`: Number of MPI processes
+- `partition`: Job queue/partition name
+- `walltime`: Maximum runtime
+- `account`: Billing account (if required)
+- `modules`: Environment modules to load
 
-The plugin skill files are thin wrappers, and `.claude/skills/` remains the canonical instruction source.
-
-Repo-local plugin path:
-
-- marketplace: `.agents/plugins/marketplace.json`
-- plugin root: `plugins/wrf/`
-
-If you want home-global installation instead of a repo-local plugin, the older skill installer still works:
+### Step 3: Verify Environment
 
 ```bash
-git clone https://github.com/origin652/wrf-skill.git
+# Check if WRF/WPS are accessible
+ls -l $(python3 -c "import json; print(json.load(open('config/wrf_env.json'))['wrf_root'])")/main/wrf.exe
+
+# Check WPS_GEOG data
+ls -l $(python3 -c "import json; print(json.load(open('config/wrf_env.json'))['geog_data_path'])")
+
+# Test initialization (dry-run)
+python3 scripts/wrf.py init --project-name test_init --dry-run
+```
+
+---
+
+## Usage Guide
+
+### Method 1: Using Claude Code (Recommended)
+
+#### 1. Open Project
+
+Open the wrf-skill directory in Claude Code:
+
+```bash
+# In terminal
 cd wrf-skill
+code .  # Or open with Claude Code
+```
+
+#### 2. Talk to AI
+
+Claude will automatically recognize WRF skills, and you can interact in natural language:
+
+**Initialize Project:**
+```
+You: Help me initialize a WRF project named "typhoon_case"
+```
+
+**Configure Simulation:**
+```
+You: Configure a typhoon simulation:
+- Region: East China Sea and Taiwan Strait (120-130°E, 20-30°N)
+- Resolution: 9km outer domain, 3km inner domain
+- Time: August 1, 2024 00:00 to August 3, 2024 00:00
+- Data: GFS
+- Physics: Thompson microphysics, RRTMG radiation, YSU PBL
+```
+
+**Run Workflow:**
+```
+You: Download GFS data and run WPS preprocessing
+```
+
+```
+You: Submit WRF simulation to HPC cluster
+```
+
+**Check Status:**
+```
+You: Check simulation status
+```
+
+**Post-processing:**
+```
+You: Generate the following plots:
+1. Surface temperature and wind
+2. 850hPa temperature and wind
+3. Accumulated precipitation
+4. Vertical cross-section along 25°N
+```
+
+### Method 2: Command Line Usage
+
+#### Complete Workflow Example
+
+```bash
+# ========== 1. Initialize Project ==========
+python3 scripts/wrf.py init --project-name my_case
+
+# ========== 2. Configure Simulation ==========
+# Option A: Using natural language description
+python3 scripts/wrf.py config \
+  --project-name my_case \
+  --request-text "East China, center 120E 30N, 9km outer 3km inner, GFS data, 2024-07-20 00:00 to 2024-07-22 00:00, local mode"
+
+# Option B: Using command line parameters
+python3 scripts/wrf.py config \
+  --project-name my_case \
+  --center-lon 120.0 \
+  --center-lat 30.0 \
+  --domain-size 500 \
+  --resolution 9 \
+  --start-time "2024-07-20 00:00:00" \
+  --end-time "2024-07-22 00:00:00" \
+  --forcing-source gfs \
+  --run-mode local
+
+# ========== 3. Download Meteorological Data ==========
+python3 scripts/wrf.py data --project-name my_case
+
+# Check download progress
+python3 scripts/wrf.py status --project-name my_case
+
+# ========== 4. Run WPS Preprocessing ==========
+python3 scripts/wrf.py wps --project-name my_case
+
+# Wait for WPS completion
+python3 scripts/wrf.py status --project-name my_case
+
+# ========== 5. Run WRF Simulation ==========
+# Local execution
+python3 scripts/wrf.py run --project-name my_case
+
+# Or submit to HPC (if configured)
+python3 scripts/wrf.py run --project-name my_case --run-mode hpc
+
+# ========== 6. Monitor Status ==========
+# Check status
+python3 scripts/wrf.py status --project-name my_case
+
+# View logs
+python3 scripts/wrf.py logs --project-name my_case
+
+# For HPC jobs, collect outputs
+python3 scripts/wrf.py collect --project-name my_case
+
+# ========== 7. Post-processing and Visualization ==========
+# Generate post-processing configuration
+python3 scripts/post_spec.py --project-name my_case --output post_spec.json
+
+# Or use complete example
+cp templates/post_spec.example.json post_spec.json
+
+# Run post-processing
+python3 scripts/wrf.py post --project-name my_case --post-spec post_spec.json
+
+# Or render individual figures
+python3 scripts/plot_wrfout.py \
+  --wrfout runs/my_case/wrf/wrfout_d01_2024-07-20_00:00:00 \
+  --figure-id surface_temperature \
+  --post-spec post_spec.json \
+  --out output/temperature.png
+```
+
+#### Quick Command Reference
+
+```bash
+# View help
+python3 scripts/wrf.py --help
+python3 scripts/wrf.py <command> --help
+
+# Check version
+python3 scripts/wrf.py --version
+
+# List all projects
+ls runs/
+
+# View project status
+cat runs/my_case/project.json
+
+# Cancel running task
+python3 scripts/wrf.py cancel --project-name my_case
+
+# Clean up temporary files
+python3 scripts/wrf.py cleanup --dry-run  # Preview
+python3 scripts/wrf.py cleanup            # Execute cleanup
+```
+
+### Method 3: Using with Codex
+
+#### 1. Install Codex Plugin
+
+```bash
+# Option A: Open this repository directly in Codex (recommended)
+cd wrf-skill
+# Then open this directory in Codex
+
+# Option B: Global installation
 bash scripts/install_codex_skills.sh
 ```
 
-If Codex is already open, start a new window or new session after adding the repo plugin or installing skills so it reloads the skill list.
+#### 2. Create Workspace
 
-Then ask Codex to create a workspace, for example:
+In Codex conversation:
 
-- `Use wrf-workspace-init to create a workspace at /path/to/my-wrf-workspace.`
-- `Use wrf-workspace-init to create a WRF workspace in the current directory.`
+```
+You: Use wrf-workspace-init to create a new workspace at ~/wrf-projects/my-workspace
+```
 
-If you want to run the bundled workspace-init script directly:
+Or use command line:
 
 ```bash
 bash ~/.codex/skills/wrf-workspace-init/scripts/init_workspace.sh \
-  --target-root /path/to/my-wrf-workspace
+  --target-root ~/wrf-projects/my-workspace
 ```
 
-After that, open the generated workspace path in Codex and continue the actual WRF work there.
-
-## What `wrf-workspace-init` Creates
-
-The generated workspace is a portable minimal working tree for this repository's workflow layer.
-It includes:
-
-- `.claude/skills/`
-- `config/`
-- `scripts/`
-- `templates/`
-- `third_party/wps-support/`
-- `runs/.gitkeep`
-
-It intentionally excludes:
-
-- private `config/wrf_env.json`
-- compiled WRF/WPS trees
-- full `WPS_GEOG`
-- existing run outputs
-- private SSH or scheduler credentials
-
-If you need HPC mode inside the generated workspace:
+#### 3. Work in Workspace
 
 ```bash
-cp config/wrf_env.hpc.example.json config/wrf_env.json
+cd ~/wrf-projects/my-workspace
+# Open this directory in Codex
 ```
 
-Then fill in your site-specific values.
+Then you can interact with Codex just like using Claude Code.
 
-## Bundle Deployment
+---
 
-If you need to hand this workflow to someone else, you can still build a redistribution bundle:
+## Advanced Usage
 
-```bash
-python3 scripts/package_skill_bundle.py --output dist/wrf-skill-bundle.tar.gz
-```
+---
 
-Install the extracted bundle into another workspace:
+## Key Features
 
-```bash
-tar -xzf dist/wrf-skill-bundle.tar.gz
-cd wrf-skill-bundle
-python3 scripts/install_skill_bundle.py --target /path/to/workspace
-```
+### 🤖 AI-Driven Configuration Generation
 
-Use `--force` only when you intentionally want to overwrite the bundled files already present in the target workspace.
-
-## Runtime Boundaries
-
-### Local runtime
-
-Local customization is intentionally constrained.
-Use `custom_safe` only when you explicitly need local runtime customization.
-
-Important boundaries:
-
-- only structured argv templates are allowed
-- raw shell strings are not allowed
-- `bash -lc`, `sh -c`, pipes, redirects, `&&`, `;`, `source`, `module load`, and similar shell chaining are intentionally blocked
-
-### HPC runtime
-
-The agent can work with HPC settings only if you expose them through files and commands that already exist in the environment.
-That means it can usually:
-
-- read `config/wrf_env.json`
-- inspect project state and logs
-- use scheduler access that is already available in the current session
-
-It cannot automatically:
-
-- infer hidden cluster policy
-- see real-time capacity unless the environment exposes it
-- install missing dependencies for you
-
-## First Useful Flow
-
-A minimal local workflow looks like this:
+Describe your simulation needs in natural language, and AI will automatically generate the correct configuration files:
 
 ```bash
-python3 scripts/wrf.py init --project-name demo
 python3 scripts/wrf.py config \
   --project-name demo \
-  --request-text "East China, GFS, 2024-07-20 00:00 to 2024-07-20 12:00, local" \
-  --run-mode local
-python3 scripts/wrf.py data --project-name demo
-python3 scripts/wrf.py wps --project-name demo
-python3 scripts/wrf.py run --project-name demo
+  --request-text "Yangtze River Delta, 3km resolution, ERA5 data, 2024-08-01 to 2024-08-03"
 ```
 
-If you only want preprocessing first, stop after `wrf-wps`.
+### 📦 Automatic Data Download
 
-`scripts/wrf.py` is the preferred user-facing entry point. The legacy direct entries
-`scripts/wrf_init.py`, `scripts/wrf_config.py`, `scripts/wrf_task.py`, and
-`scripts/wrf_post.py` remain supported for compatibility.
+Supports mainstream meteorological data sources:
+- **GFS**: Global Forecast System (0.25° resolution)
+- **FNL**: NCEP Final Analysis (1° resolution)
+- **ERA5**: ECMWF Reanalysis (0.25° resolution)
 
-## Post-processing Protocol
+### 🖥️ Flexible Execution Modes
 
-`post_spec.json` is the intended request format for post-processing and diagnostics.
-The canonical shape is `schema_version=3` with top-level `defaults`, `style_defs`, optional `view_defs`, `layer_defs`, and `figures`.
-The current published contract now uses `schema_version=3`.
+- **Local mode**: Run directly on your machine
+- **HPC mode**: Automatically generate job scripts and submit to Slurm/PBS schedulers
 
-Stable sections:
+### 📊 Powerful Post-Processing
 
-- `layer_defs` for reusable computed data layers such as `t2_c`, `wind10m`, `terrain`, and `accum_precip`
-- `style_defs` for reusable draw presets such as raster, contour, categorical, and vector styling
-- `view_defs` for reusable 2-axis view extraction (map or axis-aligned sections)
-- `figures[*].inputs` for file resolution
-- `figures[*].selectors` for domain and time selection
-- `figures[*].render` for figure-level rendering defaults
-- `figures[*].output` for output location and sidecar behavior
-- `figures[*].layers[*].style_id` and `figures[*].layers[*].draw` for reusable styles plus per-layer overrides
-- `figures[*].view_id` (or inline `figures[*].view`) for selecting a reusable view
-
-Render-layer shapes:
-
-- scalar layers use `layer_id`
-- vector layers use `u_layer_id` plus `v_layer_id` with `draw.kind=vector`
-- path-section vectors can also use `vertical_layer_id` together with explicit `draw.style.axis_projection`
-- the current vector renderer supports `style.mode=quiver`
-
-Current `layer_defs[*].source.kind` modes:
-
-- `wrf_native_2d` for direct 2D WRF variables
-- `wrf_native_3d` for 3D WRF variables with `source.level_selector`
-- `wrf_native_3d_full` for full 3D fields (used by section views such as `time x bottom_top`)
-- `wrf_diag` for built-in diagnostics such as `wind_speed_10m`, `wind_dir_10m`, `total_precip`, `temp_c_2m`, and `rh2`
-- `wrf_native` is still accepted as an alias of `wrf_native_2d`
-
-For section rendering, native WRF `U`, `V`, and `W` can also be loaded through `wrf_native_3d_full`; the runtime destaggers them onto the mass grid before resolving the view.
-
-Current view scope:
-
-- map views on `west_east x south_north`
-- axis-aligned native-dimension sections such as `time-x` and `time-y`
-- derived-coordinate sections using `time` with `height_m` or `pressure_hpa`
-- path sections using `distance_km` with `bottom_top`, `height_m`, or `pressure_hpa`
-- selector modes in `view.selectors`: `index`, `nearest_index`, `value`, `nearest_value`, `first`, `last`, `current`, `mean`, `min`, `max`, and `sum`
-- vector draw (`draw.kind=vector`) supports map views and path views with explicit `draw.style.axis_projection`
-
-For the current runnable v3 behavior, examples, and boundaries, see `docs/post_runtime_v3.md`.
-
-Generate a starter spec:
+Define visualization needs using `post_spec.json`:
+- Map views (temperature, wind, precipitation, etc.)
+- Vertical cross-sections (time-height, time-pressure)
+- Path cross-sections (vertical structure along arbitrary paths)
+- Vector field overlays (wind, circulation)
 
 ```bash
+# Generate post-processing configuration template
 python3 scripts/post_spec.py --project-name demo --output post_spec.json
-```
 
-If you want a fuller v3 example with reusable layers, a per-frame figure, and a range-only figure, start from:
-
-```bash
+# Or use the complete example
 cp templates/post_spec.example.json post_spec.json
-```
 
-That example also includes complete runnable examples for:
-
-- a map-vector figure using reusable scalar `u10` and `v10` layers plus a `wind_quiver` style preset
-- a `time-x` section powered by `view_defs`
-- a mean-reduced selector example
-- a `time-pressure` moisture column
-- a `distance_km x height_m` path section
-- a path-section vector overlay using native WRF `U`, `V`, and `W`
-
-Normalize and validate an existing spec:
-
-```bash
-python3 scripts/post_spec.py --input post_spec.json --output post_spec.json
-```
-
-Interpret a spec into its resolved execution plan:
-
-```bash
-python3 scripts/post_spec.py --input post_spec.json --interpret
-```
-
-Render a single named figure definition directly from one or more `wrfout` files:
-
-```bash
+# Render specific figures
 python3 scripts/plot_wrfout.py \
   --wrfout runs/demo/wrf/wrfout_d01_2024-07-20_00:00:00 \
   --figure-id surface_temperature \
   --post-spec post_spec.json \
-  --out surface-temperature.png
+  --out temperature.png
 ```
 
-The machine-readable contract lives in `config/post_schema.json`.
+---
 
-Current section support is intentionally scoped, but it already includes `time-x`, `time-y`, `time-height`, `time-pressure`, selector reductions, `distance_km` path sections, and explicit path-section vector projection.
-The runnable contract now uses `schema_version=3`; design notes for future arbitrary 2-axis extensions beyond that scope live in `docs/post_view_protocol.md`.
+## Utilities
 
-## Scope
+### Clean Up Temporary Files
 
-This repository is best understood as:
+```bash
+# Preview what will be cleaned
+python3 scripts/wrf.py cleanup --dry-run
 
-- a Claude Code skill workspace
-- a Codex skill bundle plus workspace bootstrapper
-- a redistribution-friendly WRF workflow layer
+# Clean temporary directories
+python3 scripts/wrf.py cleanup
 
-It is not a replacement for a real WRF/WPS installation.
+# Clean stale projects older than 48 hours
+python3 scripts/wrf.py cleanup --include-stale --max-age 48
+```
 
-## Third-Party Files and License
+### Check Version
 
-Lightweight WPS support files are documented in [THIRD_PARTY.md](THIRD_PARTY.md).
-Project-authored files are released under [Apache-2.0](LICENSE).
+```bash
+python3 scripts/wrf.py --version
+```
+
+---
+
+## Project Structure
+
+```
+wrf-skill/
+├── scripts/           # Core workflow scripts
+│   ├── wrf.py        # Unified CLI entry point
+│   ├── wrf_init.py   # Project initialization
+│   ├── wrf_config.py # Configuration generation
+│   ├── wrf_data.py   # Data download
+│   ├── wrf_wps.py    # WPS preprocessing
+│   ├── wrf_run.py    # WRF execution
+│   ├── wrf_post.py   # Post-processing
+│   └── cleanup.py    # Cleanup utility
+├── config/            # Configuration files
+│   ├── wrf_env.json  # Runtime environment config (create yourself)
+│   ├── domains_presets.json    # Domain presets
+│   ├── physics_schemes.json    # Physics schemes
+│   └── post_schema.json        # Post-processing schema
+├── templates/         # Configuration templates
+├── runs/             # Simulation project directories
+└── docs/             # Documentation
+```
+
+---
+
+## Configuration
+
+### Local Execution Configuration
+
+Create `config/wrf_env.json`:
+
+```json
+{
+  "wrf_root": "/path/to/WRF",
+  "wps_root": "/path/to/WPS",
+  "geog_data_path": "/path/to/WPS_GEOG"
+}
+```
+
+### HPC Execution Configuration
+
+Start from the example:
+
+```bash
+cp config/wrf_env.hpc.example.json config/wrf_env.json
+```
+
+Edit key fields:
+
+```json
+{
+  "wrf_root": "/path/to/WRF",
+  "wps_root": "/path/to/WPS",
+  "geog_data_path": "/path/to/WPS_GEOG",
+  "hpc": {
+    "backend": "slurm",
+    "remote_host": "your-hpc-login-node",
+    "remote_project_root": "/scratch/username/wrf-projects",
+    "runtime": {
+      "mode": "mpirun",
+      "wrf_nproc": 48,
+      "partition": "compute",
+      "walltime": "06:00:00"
+    }
+  }
+}
+```
+
+---
+
+## Using with Codex
+
+This repository includes a Codex plugin for direct use:
+
+```bash
+git clone https://github.com/origin652/wrf-skill.git
+cd wrf-skill
+
+# Method 1: Open this repository directly in Codex (recommended)
+# Codex will automatically discover .agents/plugins/marketplace.json
+
+# Method 2: Install globally to ~/.codex/skills/
+bash scripts/install_codex_skills.sh
+```
+
+Then tell Codex:
+- "Use wrf-workspace-init to create a new workspace"
+- "Help me configure a typhoon simulation"
+
+---
+
+## Post-Processing Protocol
+
+WRF Skill uses `schema_version=3` post-processing specification, supporting:
+
+### Layer Definitions (layer_defs)
+- `wrf_native_2d`: 2D native variables
+- `wrf_native_3d`: 3D native variables (with level selection)
+- `wrf_diag`: Diagnostic quantities (wind speed, direction, relative humidity, etc.)
+
+### View Types (view_defs)
+- Map views: `west_east × south_north`
+- Time cross-sections: `time-x`, `time-y`
+- Vertical cross-sections: `time-height`, `time-pressure`
+- Path cross-sections: `distance_km × height_m/pressure_hpa`
+
+### Style Definitions (style_defs)
+- Raster fill (raster)
+- Contour lines (contour)
+- Categorical fill (categorical)
+- Vector fields (vector/quiver)
+
+Full documentation: `docs/post_runtime_v3.md`.
+
+---
+
+## FAQ
+
+**Q: Do I need to compile WRF myself?**  
+A: Yes, this tool assumes you already have a working WRF/WPS environment.
+
+**Q: Which meteorological data sources are supported?**  
+A: Currently built-in support for GFS, FNL, and ERA5. Other sources require custom integration.
+
+**Q: Can I run this on Windows?**  
+A: You need WSL (Windows Subsystem for Linux).
+
+**Q: Which schedulers does HPC mode support?**  
+A: Slurm and PBS/Torque are supported.
+
+**Q: How can I contribute?**  
+A: Pull requests are welcome! Please read the contribution guidelines first.
+
+---
+
+## Development
+
+```bash
+# Install development dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest tests/
+
+# Code linting
+ruff check scripts/
+
+# Type checking
+mypy scripts/
+```
+
+---
+
+## License
+
+This project is licensed under [Apache-2.0](LICENSE).
+
+Third-party files are documented in [THIRD_PARTY.md](THIRD_PARTY.md).
+
+---
+
+## Acknowledgments
+
+Thanks to the WRF and WPS development teams for providing powerful numerical modeling tools.
+
+---
+
+## Contact
+
+- Issue tracker: [GitHub Issues](https://github.com/origin652/wrf-skill/issues)
+- Project homepage: [https://github.com/origin652/wrf-skill](https://github.com/origin652/wrf-skill)

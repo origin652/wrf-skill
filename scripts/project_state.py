@@ -8,31 +8,23 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from constants import (
+        BLOCKING_TASK_STATES,
+        TASK_STATES,
+        TERMINAL_TASK_STATES,
+        VALID_STATUSES,
+    )
     from spec_utils import default_spec
+    from utils import posix_path as posix, utc_now
 except ImportError:  # pragma: no cover
+    from .constants import (
+        BLOCKING_TASK_STATES,
+        TASK_STATES,
+        TERMINAL_TASK_STATES,
+        VALID_STATUSES,
+    )
     from .spec_utils import default_spec
-
-VALID_STATUSES = (
-    "created",
-    "env_checked",
-    "configured",
-    "data_ready",
-    "wps_ready",
-    "real_ready",
-    "running",
-    "completed",
-    "failed",
-)
-
-TASK_STATES = (
-    "queued",
-    "running",
-    "completed",
-    "failed",
-    "canceled",
-)
-BLOCKING_TASK_STATES = {"queued", "running"}
-TERMINAL_TASK_STATES = {"completed", "failed", "canceled"}
+    from .utils import posix_path as posix, utc_now
 
 ALLOWED_TRANSITIONS = {
     "created": {"env_checked", "configured", "failed"},
@@ -45,14 +37,6 @@ ALLOWED_TRANSITIONS = {
     "completed": set(),
     "failed": set(),
 }
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def posix_path(path: Path | str) -> str:
-    return Path(path).as_posix()
 
 
 def simulation_spec_template(project_name: str) -> dict[str, Any]:
@@ -75,12 +59,12 @@ def create_project_state(
         "status": "created",
         "current_step": "wrf-init",
         "paths": {
-            "project_root": posix_path(root),
-            "data_dir": posix_path(root / "data"),
-            "wps_dir": posix_path(root / "wps"),
-            "wrf_dir": posix_path(root / "wrf"),
-            "output_dir": posix_path(root / "output"),
-            "log_dir": posix_path(root / "logs"),
+            "project_root": posix(root),
+            "data_dir": posix(root / "data"),
+            "wps_dir": posix(root / "wps"),
+            "wrf_dir": posix(root / "wrf"),
+            "output_dir": posix(root / "output"),
+            "log_dir": posix(root / "logs"),
         },
         "artifacts": {
             "namelist_wps": None,

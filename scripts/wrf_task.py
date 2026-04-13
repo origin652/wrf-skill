@@ -13,6 +13,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
+    from constants import (
+        HPC_DEFAULT_POLL_INTERVAL_SECONDS,
+        HPC_QUEUED_POLL_INTERVAL_SECONDS,
+        HPC_RUNNING_POLL_INTERVAL_SECONDS,
+        LOCAL_POLL_INTERVAL_SECONDS,
+        TAIL_READ_BLOCK_SIZE,
+        TASK_STEPS,
+        TERMINAL_TASK_STATES,
+    )
     from hpc import get_scheduler_adapter
     from hpc.admission import evaluate_admission
     from hpc.base import resolve_access_mode, resolve_transfer_host
@@ -20,15 +29,14 @@ try:
     from project_state import (
         assert_mutation_allowed,
         load_project,
-        posix_path,
         record_admission,
         record_error,
         record_task_terminal,
         save_project,
         set_active_task,
-        TERMINAL_TASK_STATES,
-        utc_now,
     )
+    from spec_utils import normalize_spec
+    from utils import posix_path, utc_now
     from wrf_data import prepare_data
     from wrf_run import (
         build_inventory,
@@ -50,8 +58,16 @@ try:
         stage_support_files,
         update_project_for_wps,
     )
-    from spec_utils import normalize_spec
 except ImportError:  # pragma: no cover
+    from .constants import (
+        HPC_DEFAULT_POLL_INTERVAL_SECONDS,
+        HPC_QUEUED_POLL_INTERVAL_SECONDS,
+        HPC_RUNNING_POLL_INTERVAL_SECONDS,
+        LOCAL_POLL_INTERVAL_SECONDS,
+        TAIL_READ_BLOCK_SIZE,
+        TASK_STEPS,
+        TERMINAL_TASK_STATES,
+    )
     from .hpc import get_scheduler_adapter
     from .hpc.admission import evaluate_admission
     from .hpc.base import resolve_access_mode, resolve_transfer_host
@@ -59,15 +75,14 @@ except ImportError:  # pragma: no cover
     from .project_state import (
         assert_mutation_allowed,
         load_project,
-        posix_path,
         record_admission,
         record_error,
         record_task_terminal,
         save_project,
         set_active_task,
-        TERMINAL_TASK_STATES,
-        utc_now,
     )
+    from .spec_utils import normalize_spec
+    from .utils import posix_path, utc_now
     from .wrf_data import prepare_data
     from .wrf_run import (
         build_inventory,
@@ -89,10 +104,6 @@ except ImportError:  # pragma: no cover
         stage_support_files,
         update_project_for_wps,
     )
-    from .spec_utils import normalize_spec
-
-TASK_STEPS = {"wrf-data", "wrf-wps", "wrf-run"}
-POLL_INTERVAL_SECONDS = 0.2
 
 
 class TaskPreflightError(RuntimeError):
@@ -199,15 +210,106 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8", newline="\n")
 
 
-def read_last_nonempty_line(path: Path) -> str | None:
+def _read_tail_blocks(path: Path, *, min_newlines: int) -> bytes:
     if not path.exists() or not path.is_file():
+        return b""
+
+    blocks: list[bytes] = []
+    newline_count = 0
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        offset = handle.tell()
+        while offset > 0 and newline_count <= min_newlines:
+            read_size = min(TAIL_READ_BLOCK_SIZE, offset)
+            offset -= read_size
+            handle.seek(offset)
+            block = handle.read(read_size)
+            blocks.append(block)
+            newline_count += block.count(b"\n")
+    return b"".join(reversed(blocks))
+
+
+def read_last_nonempty_line(path: Path) -> str | None:
+    data = _read_tail_blocks(path, min_newlines=1)
+    if not data:
         return None
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = data.decode("utf-8", errors="replace").splitlines()
     for line in reversed(lines):
         stripped = line.strip()
         if stripped:
             return stripped
     return None
+
+
+def read_last_lines_text(path: Path, *, lines: int) -> str:
+    if lines <= 0:
+        return ""
+    data = _read_tail_blocks(path, min_newlines=lines)
+    if not data:
+        return ""
+    lines_list = data.decode("utf-8", errors="replace").splitlines()
+    return "\n".join(lines_list[-lines:])
+
+
+def _local_task_log_candidates(state: dict[str, Any], task: dict[str, Any]) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        key = posix_path(path)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(path)
+
+    step = str(task.get("step") or "")
+    task_log_path = Path(task["log_path"])
+    if step == "wrf-run" and str(task.get("state") or "").lower() == "running":
+        wrf_dir = Path(state["paths"]["wrf_dir"])
+        log_dir = Path(state["paths"]["log_dir"])
+        add(wrf_dir / "rsl.out.0000")
+        add(wrf_dir / "rsl.error.0000")
+        add(task_log_path)
+        add(log_dir / "wrf-run-real.log")
+        add(log_dir / "wrf-run-wrf.log")
+        add(log_dir / "wrf-run.log")
+        return candidates
+
+    add(task_log_path)
+    return candidates
+
+
+def resolve_local_task_log_path(
+    state: dict[str, Any],
+    task: dict[str, Any],
+    *,
+    require_content: bool = False,
+) -> Path:
+    candidates = _local_task_log_candidates(state, task)
+    if require_content:
+        for path in candidates:
+            if read_last_nonempty_line(path):
+                return path
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return path
+    return candidates[0]
+
+
+def poll_interval_seconds(task: dict[str, Any] | None) -> float:
+    if not isinstance(task, dict):
+        return LOCAL_POLL_INTERVAL_SECONDS
+
+    backend = str(task.get("backend") or "local").lower()
+    if backend == "local":
+        return LOCAL_POLL_INTERVAL_SECONDS
+
+    state = str(task.get("state") or "").lower()
+    if state == "queued":
+        return HPC_QUEUED_POLL_INTERVAL_SECONDS
+    if state == "running":
+        return HPC_RUNNING_POLL_INTERVAL_SECONDS
+    return HPC_DEFAULT_POLL_INTERVAL_SECONDS
 
 
 def render_notification_command(command: list[str] | str, context: dict[str, Any]) -> list[str]:
@@ -662,7 +764,8 @@ def find_task(project_dir: Path, state: dict[str, Any], task_id: str | None) -> 
 
 
 def refresh_local_task(project_json: Path, task: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    project_dir = Path(load_project(project_json)["paths"]["project_root"])
+    state = load_project(project_json)
+    project_dir = Path(state["paths"]["project_root"])
     exit_code_file = Path(task["exit_code_path"])
     task_changed = False
     if task["state"] not in TERMINAL_TASK_STATES:
@@ -673,12 +776,19 @@ def refresh_local_task(project_json: Path, task: dict[str, Any]) -> tuple[dict[s
             task["last_progress"] = f"exit_code={exit_code}"
             task_changed = True
         elif process_alive(task.get("pid")):
-            progress_line = read_last_nonempty_line(Path(task["log_path"]))
+            progress_log_path = resolve_local_task_log_path(state, task, require_content=True)
+            progress_line = read_last_nonempty_line(progress_log_path)
             desired_progress = progress_line or "running"
-            if task["state"] != "running" or task.get("last_progress") != desired_progress:
+            desired_log_path = posix_path(progress_log_path)
+            if (
+                task["state"] != "running"
+                or task.get("last_progress") != desired_progress
+                or task.get("log_path") != desired_log_path
+            ):
                 task["state"] = "running"
                 task["started_at"] = task.get("started_at") or utc_now()
                 task["last_progress"] = desired_progress
+                task["log_path"] = desired_log_path
                 task_changed = True
         else:
             task["state"] = "failed"
@@ -690,8 +800,6 @@ def refresh_local_task(project_json: Path, task: dict[str, Any]) -> tuple[dict[s
         save_task(task)
         config = load_json(task["config_path"])
         state = finalize_task(project_json, config, task) if task["state"] in TERMINAL_TASK_STATES else store_active_task(project_json, task["step"], task)
-    else:
-        state = load_project(project_json)
     return state, task
 
 
@@ -825,7 +933,7 @@ def wait_for_task(
             return payload
         if time.time() >= deadline:
             raise TimeoutError(f"Task {task['id']} did not finish within {timeout_seconds} seconds")
-        time.sleep(POLL_INTERVAL_SECONDS)
+        time.sleep(poll_interval_seconds(task))
 
 
 def logs_task(
@@ -841,12 +949,14 @@ def logs_task(
     task = find_task(project_dir, state, task_id)
     if task is None:
         return {"project": state, "task": None, "log_path": None, "text": ""}
-    log_path = Path(task["log_path"])
+    log_path = (
+        resolve_local_task_log_path(state, task, require_content=True)
+        if task["backend"] == "local"
+        else Path(task["log_path"])
+    )
     if not log_path.exists():
         return {"project": state, "task": task_summary(task), "log_path": posix_path(log_path), "text": ""}
-    content = log_path.read_text(encoding="utf-8")
-    lines_list = content.splitlines()
-    tail = "\n".join(lines_list[-lines:])
+    tail = read_last_lines_text(log_path, lines=lines)
     return {
         "project": state,
         "task": task_summary(task),

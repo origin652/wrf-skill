@@ -4,6 +4,7 @@ import shutil
 import stat
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from netCDF4 import Dataset
 
@@ -149,6 +150,43 @@ class WrfRunTests(unittest.TestCase):
         self.assertTrue(target.exists())
         self.assertTrue(target.stat().st_mode & stat.S_IXUSR)
 
+    def test_stage_files_skips_unchanged_existing_target(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_stage_skip_unchanged")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        source = runs_dir / "source" / "met_em.d01.2024-07-20_00:00:00.nc"
+        target_dir = runs_dir / "target"
+        target = target_dir / source.name
+        source.parent.mkdir(parents=True, exist_ok=True)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        source.write_text("met\n", encoding="utf-8")
+        target.write_text("met\n", encoding="utf-8")
+        stamp = 1_700_000_000_000_000_000
+        os.utime(source, ns=(stamp, stamp))
+        os.utime(target, ns=(stamp, stamp))
+
+        with patch("scripts.wrf_run.shutil.copy2") as mock_copy2:
+            staged = stage_files([source], target_dir)
+
+        self.assertEqual(staged, [target.as_posix()])
+        self.assertFalse(mock_copy2.called)
+
+    def test_stage_files_overwrites_changed_target(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_stage_changed")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        source = runs_dir / "source" / "met_em.d01.2024-07-20_00:00:00.nc"
+        target_dir = runs_dir / "target"
+        target = target_dir / source.name
+        source.parent.mkdir(parents=True, exist_ok=True)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        source.write_text("fresh\n", encoding="utf-8")
+        target.write_text("old\n", encoding="utf-8")
+
+        stage_files([source], target_dir)
+
+        self.assertEqual(target.read_text(encoding="utf-8"), "fresh\n")
+
     def init_wps_ready_project(self, runs_dir: Path, config_copy: Path) -> None:
         initialize_project(
             "demo",
@@ -239,6 +277,27 @@ class WrfRunTests(unittest.TestCase):
         self.assertTrue((project_root / "logs" / "wrf-run-real.log").exists())
         self.assertTrue((project_root / "logs" / "wrf-run-wrf.log").exists())
         self.assertTrue((wrf_dir / "LANDUSE.TBL").exists())
+        self.assertTrue((wrf_dir / "met_em.d01.2024-07-20_00:00:00.nc").exists())
+
+    def test_run_project_removes_stale_met_em_before_staging(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_run_stale_met_em")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        fake_wps_root = runs_dir / "_fake_wps"
+        fake_wrf_root = runs_dir / "_fake_wrf"
+        build_fake_wps_root(fake_wps_root)
+        build_fake_wrf_root(fake_wrf_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.json", wps_dir=fake_wps_root, wrf_dir=fake_wrf_root)
+        self.init_wps_ready_project(runs_dir, config_copy)
+
+        wrf_dir = runs_dir / "demo" / "wrf"
+        stale_met_em = wrf_dir / "met_em.d01.2024-07-19_21:00:00.nc"
+        stale_met_em.write_text("stale\n", encoding="utf-8")
+
+        payload = run_project("demo", runs_dir=runs_dir, config_path=config_copy, dry_run=False)
+
+        self.assertEqual(payload["project"]["status"], "completed")
+        self.assertFalse(stale_met_em.exists())
         self.assertTrue((wrf_dir / "met_em.d01.2024-07-20_00:00:00.nc").exists())
 
     def test_run_project_supports_custom_safe_runtime(self) -> None:

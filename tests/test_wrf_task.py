@@ -16,6 +16,7 @@ from scripts.wrf_task import (
     cancel_task,
     collect_task,
     create_task_metadata,
+    logs_task,
     save_task,
     start_task,
     status_task,
@@ -180,8 +181,11 @@ class WrfTaskTests(unittest.TestCase):
         task["log_path"] = (project_dir / "logs" / "wrf-data.log").as_posix()
         save_task(task)
         store_active_task(project_json, "wrf-data", task)
+        noise = "".join(f"line {index}\n" for index in range(2000))
         (project_dir / "logs" / "wrf-data.log").write_text(
-            "phase=starting\nprogress completed=1/3 remaining=2 downloaded=1 skipped=0 failed=0 file=gfs.t00z.pgrb2.0p25.f000 status=downloaded attempts=1 size_bytes=16\n",
+            noise
+            + "phase=starting\n"
+            + "progress completed=1/3 remaining=2 downloaded=1 skipped=0 failed=0 file=gfs.t00z.pgrb2.0p25.f000 status=downloaded attempts=1 size_bytes=16\n\n\n",
             encoding="utf-8",
         )
 
@@ -192,6 +196,103 @@ class WrfTaskTests(unittest.TestCase):
         self.assertEqual(payload["task"]["state"], "running")
         self.assertIn("progress completed=1/3", payload["task"]["last_progress"])
         self.assertIn("progress completed=1/3", refreshed_task["last_progress"])
+
+    def test_logs_task_returns_requested_tail_lines(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_task_logs_tail")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        project_dir = runs_dir / "demo"
+        project_json = project_dir / "project.json"
+        task = create_task_metadata(
+            "demo",
+            "wrf-wps",
+            "local",
+            project_dir,
+            "task-logs-tail",
+            runs_dir=runs_dir,
+            config_path=CONFIG_PATH,
+            params={},
+        )
+        task["state"] = "running"
+        task["log_path"] = (project_dir / "logs" / "wrf-wps.log").as_posix()
+        save_task(task)
+        store_active_task(project_json, "wrf-wps", task)
+        (project_dir / "logs" / "wrf-wps.log").write_text(
+            "".join(f"line {index}\n" for index in range(300)),
+            encoding="utf-8",
+        )
+
+        payload = logs_task("demo", task_id="task-logs-tail", runs_dir=runs_dir, lines=2)
+
+        self.assertEqual(payload["text"], "line 298\nline 299")
+
+    def test_status_uses_rsl_progress_for_running_local_wrf_run(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_task_wrf_run_rsl_progress")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        project_dir = runs_dir / "demo"
+        project_json = project_dir / "project.json"
+        task = create_task_metadata(
+            "demo",
+            "wrf-run",
+            "local",
+            project_dir,
+            "task-wrf-run-progress",
+            runs_dir=runs_dir,
+            config_path=CONFIG_PATH,
+            params={},
+        )
+        task["pid"] = 12345
+        task["state"] = "running"
+        save_task(task)
+        store_active_task(project_json, "wrf-run", task)
+        Path(task["log_path"]).write_text("", encoding="utf-8")
+        (project_dir / "wrf" / "rsl.out.0000").write_text(
+            "Timing for main: time 2024-07-20_00:10:48 on domain   1:    3.01997 elapsed seconds\n",
+            encoding="utf-8",
+        )
+
+        with patch("scripts.wrf_task.process_alive", return_value=True):
+            payload = status_task("demo", task_id="task-wrf-run-progress", runs_dir=runs_dir)
+
+        refreshed_task = json.loads(task_json_path(project_dir, "task-wrf-run-progress").read_text(encoding="utf-8"))
+        self.assertIn("2024-07-20_00:10:48", payload["task"]["last_progress"])
+        self.assertTrue(payload["task"]["log_path"].endswith("/wrf/rsl.out.0000"))
+        self.assertEqual(refreshed_task["log_path"], (project_dir / "wrf" / "rsl.out.0000").as_posix())
+
+    def test_logs_task_uses_rsl_tail_for_running_local_wrf_run(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_task_wrf_run_rsl_logs")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        project_dir = runs_dir / "demo"
+        project_json = project_dir / "project.json"
+        task = create_task_metadata(
+            "demo",
+            "wrf-run",
+            "local",
+            project_dir,
+            "task-wrf-run-logs",
+            runs_dir=runs_dir,
+            config_path=CONFIG_PATH,
+            params={},
+        )
+        task["pid"] = 12345
+        task["state"] = "running"
+        save_task(task)
+        store_active_task(project_json, "wrf-run", task)
+        Path(task["log_path"]).write_text("", encoding="utf-8")
+        (project_dir / "wrf" / "rsl.out.0000").write_text(
+            "line 1\nline 2\nline 3\n",
+            encoding="utf-8",
+        )
+
+        payload = logs_task("demo", task_id="task-wrf-run-logs", runs_dir=runs_dir, lines=2)
+
+        self.assertEqual(payload["text"], "line 2\nline 3")
+        self.assertTrue(payload["log_path"].endswith("/wrf/rsl.out.0000"))
 
     def test_hpc_start_records_admission_then_submits(self) -> None:
         runs_dir = make_test_dir("_test_wrf_task_hpc_start")
@@ -318,6 +419,31 @@ class WrfTaskTests(unittest.TestCase):
 
         self.assertEqual(payload["task"]["state"], "running")
         self.assertEqual(payload["project"]["execution"]["active_task"]["state"], "running")
+
+    def test_wait_for_task_uses_local_poll_interval(self) -> None:
+        payloads = [
+            {"project": {}, "task": {"id": "task-local", "backend": "local", "state": "running"}},
+            {"project": {}, "task": {"id": "task-local", "backend": "local", "state": "completed"}},
+        ]
+
+        with patch("scripts.wrf_task.status_task", side_effect=payloads), patch("scripts.wrf_task.time.sleep") as mock_sleep:
+            payload = wait_for_task("demo", timeout_seconds=30)
+
+        self.assertEqual(payload["task"]["state"], "completed")
+        self.assertEqual([call.args[0] for call in mock_sleep.call_args_list], [0.5])
+
+    def test_wait_for_task_uses_hpc_poll_backoff(self) -> None:
+        payloads = [
+            {"project": {}, "task": {"id": "task-hpc", "backend": "slurm", "state": "queued"}},
+            {"project": {}, "task": {"id": "task-hpc", "backend": "slurm", "state": "running"}},
+            {"project": {}, "task": {"id": "task-hpc", "backend": "slurm", "state": "completed"}},
+        ]
+
+        with patch("scripts.wrf_task.status_task", side_effect=payloads), patch("scripts.wrf_task.time.sleep") as mock_sleep:
+            payload = wait_for_task("demo", timeout_seconds=30)
+
+        self.assertEqual(payload["task"]["state"], "completed")
+        self.assertEqual([call.args[0] for call in mock_sleep.call_args_list], [15.0, 10.0])
 
     def test_cancel_marks_local_task_canceled(self) -> None:
         runs_dir = make_test_dir("_test_wrf_task_cancel")

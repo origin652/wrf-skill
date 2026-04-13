@@ -9,6 +9,7 @@ from scripts.wrf_init import initialize_project
 
 TMP_ROOT = Path(__file__).resolve().parents[1] / "runs"
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "wrf_env.json"
+LOWRES_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "wrf_env.lowres.json"
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 DOMAINS_CONFIG = Path(__file__).resolve().parents[1] / "config" / "domains_presets.json"
 PHYSICS_CONFIG = Path(__file__).resolve().parents[1] / "config" / "physics_schemes.json"
@@ -27,6 +28,16 @@ class WrfConfigTests(unittest.TestCase):
             "demo",
             runs_dir=runs_dir,
             config_path=CONFIG_PATH,
+            templates_dir=TEMPLATES_DIR,
+            dry_run=False,
+            skip_env_check=True,
+        )
+
+    def init_project_with_config(self, runs_dir: Path, config_path: Path) -> None:
+        initialize_project(
+            "demo",
+            runs_dir=runs_dir,
+            config_path=config_path,
             templates_dir=TEMPLATES_DIR,
             dry_run=False,
             skip_env_check=True,
@@ -140,6 +151,29 @@ class WrfConfigTests(unittest.TestCase):
         namelist_wps = read_namelist(runs_dir / "demo" / "wps" / "namelist.wps")
         self.assertEqual(namelist_wps["ungrib"]["prefix"], "ERA5")
         self.assertEqual(namelist_wps["metgrid"]["fg_name"], "ERA5")
+
+    def test_configure_project_uses_config_geog_data_res_for_preset_domains(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_config_lowres_geog_data_res")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_project_with_config(runs_dir, LOWRES_CONFIG_PATH)
+
+        configure_project(
+            "demo",
+            runs_dir=runs_dir,
+            config_path=LOWRES_CONFIG_PATH,
+            domains_config=DOMAINS_CONFIG,
+            physics_config=PHYSICS_CONFIG,
+            domain_presets=["east_china"],
+            physics_preset="tropical_cyclone",
+            start_time="2024-07-20_00:00:00",
+            end_time="2024-07-20_12:00:00",
+            data_source="gfs",
+            run_mode="local",
+            dry_run=False,
+        )
+
+        namelist_wps = read_namelist(runs_dir / "demo" / "wps" / "namelist.wps")
+        self.assertEqual(namelist_wps["geogrid"]["geog_data_res"], "lowres")
 
     def test_configure_project_sets_fnl_interval_and_wps_prefix(self) -> None:
         runs_dir = make_test_dir("_test_wrf_config_fnl_prefix")

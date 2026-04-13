@@ -224,6 +224,10 @@ class HpcAdapterTests(unittest.TestCase):
         self.assertIn("module load wrf/4.7.1", script)
         self.assertIn("mpiexec -n 8 $WRF_HOME/run/real.exe", script)
         self.assertIn("mpiexec -n 8 $WRF_HOME/run/wrf.exe", script)
+        self.assertIn("rm -f met_em.d*.nc", script)
+        self.assertIn("met_em_sources=(../wps/met_em.d*.nc)", script)
+        self.assertIn('ln -sfn "../wps/$name" "$name"', script)
+        self.assertNotIn('ln -sfn "/scratch/user/wrf_runs/demo/wps/', script)
         self.assertNotIn("conda activate", script)
         self.assertTrue((project_root / "hpc" / "demo.slurm.job.sh").exists())
 
@@ -273,6 +277,20 @@ class HpcAdapterTests(unittest.TestCase):
         self.assertFalse(summary["valid"])
         self.assertIn("hpc.runtime.wrf_cmd", summary["missing_fields"])
         self.assertEqual(summary["runtime_mode"], "custom")
+
+    def test_pbs_render_job_includes_relative_met_em_staging_block(self) -> None:
+        adapter = get_scheduler_adapter("pbs")
+        config = self.pbs_config()
+        project_state, plan, project_root = self.render_fixture()
+
+        rendered = adapter.render_job(project_state, plan, config)
+        script = Path(rendered["script_path"]).read_text(encoding="utf-8")
+
+        self.assertIn("rm -f met_em.d*.nc", script)
+        self.assertIn("met_em_sources=(../wps/met_em.d*.nc)", script)
+        self.assertIn('ln -sfn "../wps/$name" "$name"', script)
+        self.assertNotIn('ln -sfn "/scratch/user/wrf_runs/demo/wps/', script)
+        self.assertTrue((project_root / "hpc" / "demo.pbs.job.sh").exists())
 
     def test_adapter_registry_accepts_new_backend_without_task_layer_changes(self) -> None:
         register_scheduler_adapter("dummy-test", DummyAdapter)

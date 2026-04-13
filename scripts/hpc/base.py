@@ -369,6 +369,26 @@ def activate_block(config: dict[str, Any], *, runtime_key: str = "runtime") -> s
     return f"source ~/.bashrc\nconda activate {python_env}"
 
 
+def stage_met_em_block(remote_project_dir: PurePosixPath | str) -> str:
+    remote_wps_dir = PurePosixPath(str(remote_project_dir)) / "wps"
+    return "\n".join(
+        [
+            "rm -f met_em.d*.nc",
+            "shopt -s nullglob",
+            "met_em_sources=(../wps/met_em.d*.nc)",
+            "shopt -u nullglob",
+            'if [[ ${#met_em_sources[@]} -eq 0 ]]; then',
+            f'  printf \'Missing met_em files in %s\\n\' "{remote_wps_dir}" >&2',
+            "  exit 1",
+            "fi",
+            'for source in "${met_em_sources[@]}"; do',
+            '  name="$(basename "$source")"',
+            '  ln -sfn "../wps/$name" "$name"',
+            "done",
+        ]
+    )
+
+
 def validate_runtime_config(config: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     runtime = hpc_runtime_config(config)
     mode = runtime["mode"]
@@ -820,6 +840,7 @@ class HpcSchedulerAdapter(ABC):
                 remote_log_dir=str(remote_log_dir),
                 module_load_block=module_load_block(config, runtime_context),
                 activate_block=activate_block(config),
+                stage_met_em_block=stage_met_em_block(remote_project_dir),
                 real_cmd=real_cmd,
                 wrf_cmd=wrf_cmd,
             )

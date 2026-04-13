@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
-import re
 from typing import Any
 
 try:
+    from constants import MULTI_DOMAIN_NAMELIST_KEYS, TEXT_TO_MODE, TEXT_TO_SOURCE, TIME_FORMAT
     from hpc.admission import evaluate_admission
     from hpc.base import resolve_access_mode
     from project_state import (
         assert_mutation_allowed,
         load_project,
-        posix_path,
         record_admission,
         register_artifact,
         reset_after_reconfigure,
@@ -22,13 +22,14 @@ try:
     )
     from render_config import render_from_spec, validate_spec, write_rendered_targets
     from spec_utils import deep_merge, default_forcing_interval_seconds, normalize_spec
+    from utils import coerce_value as coerce_override_value, dump_json, load_json, posix_path
 except ImportError:  # pragma: no cover
+    from .constants import MULTI_DOMAIN_NAMELIST_KEYS, TEXT_TO_MODE, TEXT_TO_SOURCE, TIME_FORMAT
     from .hpc.admission import evaluate_admission
     from .hpc.base import resolve_access_mode
     from .project_state import (
         assert_mutation_allowed,
         load_project,
-        posix_path,
         record_admission,
         register_artifact,
         reset_after_reconfigure,
@@ -36,68 +37,8 @@ except ImportError:  # pragma: no cover
     )
     from .render_config import render_from_spec, validate_spec, write_rendered_targets
     from .spec_utils import deep_merge, default_forcing_interval_seconds, normalize_spec
-
-TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
-MULTI_DOMAIN_NAMELIST_KEYS = {
-    "time_control": {"history_interval", "frames_per_outfile"},
-    "domains": {"e_vert", "parent_time_step_ratio"},
-    "physics": {
-        "mp_physics",
-        "cu_physics",
-        "ra_lw_physics",
-        "ra_sw_physics",
-        "bl_pbl_physics",
-        "sf_sfclay_physics",
-        "sf_surface_physics",
-    },
-}
-TEXT_TO_SOURCE = {"gfs": "gfs", "era5": "era5", "fnl": "fnl"}
-TEXT_TO_MODE = {
-    "local": "local",
-    "wsl": "local",
-    "本地": "local",
-    "单机": "local",
-    "hpc": "hpc",
-    "slurm": "hpc",
-    "pbs": "hpc",
-    "cluster": "hpc",
-    "集群": "hpc",
-}
-
-
+    from .utils import coerce_value as coerce_override_value, dump_json, load_json, posix_path
 def sync_interval_defaults_for_source(spec: dict[str, Any], previous_source: str, next_source: str) -> None:
-    previous_default = default_forcing_interval_seconds(previous_source)
-    next_default = default_forcing_interval_seconds(next_source)
-
-    timing = spec.setdefault("timing", {})
-    wps = spec.setdefault("wps", {})
-    share = wps.setdefault("share", {})
-
-    if int(timing.get("forcing_interval_seconds") or previous_default) == previous_default:
-        timing["forcing_interval_seconds"] = next_default
-    if int(share.get("interval_seconds") or previous_default) == previous_default:
-        share["interval_seconds"] = next_default
-
-
-def load_json(path: Path | str) -> dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def dump_json(path: Path | str, payload: dict[str, Any]) -> None:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(payload, handle, indent=2)
-        handle.write("\n")
-
-
-def coerce_override_value(raw_value: str) -> Any:
-    lowered = raw_value.lower()
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
     if lowered == "null":
         return None
     try:
@@ -373,7 +314,7 @@ def build_domains_from_presets(
                 "j_parent_start": j_parent_start,
                 "ref_lat": preset["ref_lat"],
                 "ref_lon": preset["ref_lon"],
-                "geog_data_res": "default",
+                "geog_data_res": None,
                 "physics": {},
             }
         )

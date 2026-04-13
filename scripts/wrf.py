@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+__version__ = "0.1.0"
+
 COMMAND_HELP = {
     "init": "Initialize a project scaffold.",
     "config": "Render simulation_spec.json and namelists.",
@@ -16,6 +18,7 @@ COMMAND_HELP = {
     "cancel": "Cancel the current task.",
     "collect": "Collect terminal HPC outputs back into project state.",
     "post": "Run post-processing for a project.",
+    "cleanup": "Clean up temporary and stale directories.",
 }
 
 TASK_STEP_COMMANDS = {
@@ -64,19 +67,26 @@ def build_forward_command(command: str, extra_args: Sequence[str]) -> list[str]:
         ]
     if command == "post":
         return [sys.executable, str(script_root / "wrf_post.py"), *extra_args]
+    if command == "cleanup":
+        return [sys.executable, str(script_root / "cleanup.py"), *extra_args]
     raise ValueError(f"Unsupported command: {command}")
 
 
 def print_help() -> None:
-    print("Unified WRF workflow entry point.")
+    print(f"Unified WRF workflow entry point (v{__version__})")
     print()
     print("Usage:")
     print("  python3 scripts/wrf.py <command> [args...]")
     print("  python3 scripts/wrf.py help [command]")
+    print("  python3 scripts/wrf.py --version")
     print()
     print("Commands:")
-    for name in ("init", "config", "data", "wps", "run", "status", "logs", "cancel", "collect", "post"):
+    for name in ("init", "config", "data", "wps", "run", "status", "logs", "cancel", "collect", "post", "cleanup"):
         print(f"  {name:<8}{COMMAND_HELP[name]}")
+    print()
+    print("Global options:")
+    print("  --version    Show version and exit")
+    print("  --help, -h   Show this help message")
     print()
     print("Compatibility:")
     print("  Existing scripts/wrf_init.py, scripts/wrf_config.py, scripts/wrf_task.py, and")
@@ -93,6 +103,13 @@ def forward_command(command: str, extra_args: Sequence[str]) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+
+    # Handle version flag
+    if args and args[0] in {"-v", "--version"}:
+        print(f"wrf-skill v{__version__}")
+        return 0
+
+    # Handle help
     if not args or args[0] in {"-h", "--help"}:
         print_help()
         return 0

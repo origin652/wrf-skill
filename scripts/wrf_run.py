@@ -229,10 +229,29 @@ def stage_files(files: list[Path], target_dir: Path) -> list[str]:
     target_dir.mkdir(parents=True, exist_ok=True)
     for source in files:
         target = target_dir / source.name
-        shutil.copyfile(source, target)
-        shutil.copymode(source, target)
+        source_stat = source.stat()
+        if target.exists() and target.is_file():
+            target_stat = target.stat()
+            if (
+                source_stat.st_size == target_stat.st_size
+                and source_stat.st_mtime_ns == target_stat.st_mtime_ns
+            ):
+                staged.append(posix_path(target))
+                continue
+        shutil.copy2(source, target)
         staged.append(posix_path(target))
     return staged
+
+
+def clear_stale_met_em_files(work_dir: Path, active_files: list[Path]) -> list[str]:
+    active_names = {path.name for path in active_files}
+    removed: list[str] = []
+    for path in sorted(work_dir.glob("met_em.d*.nc")):
+        if path.name in active_names:
+            continue
+        path.unlink()
+        removed.append(posix_path(path))
+    return removed
 
 
 
@@ -656,6 +675,7 @@ def run_project(
     support_inventory = build_inventory(support_files)
     main_log_lines.append(f"support_file_count={support_inventory['existing_count']}")
 
+    clear_stale_met_em_files(work_dir, met_em_files)
     stage_files(met_em_files, work_dir)
     stage_files(support_files, work_dir)
 
