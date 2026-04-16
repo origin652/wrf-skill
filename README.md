@@ -59,86 +59,78 @@ python3 scripts/wrf.py --version
 
 ### Step 2: Configure Runtime Environment
 
-#### Local Execution Configuration
+#### One-Click Bootstrap
 
-Create `config/wrf_env.json` file:
+Recommended path:
 
 ```bash
-# Copy template (if available) or create manually
-cat > config/wrf_env.json << 'EOF'
-{
-  "wrf_root": "/home/username/WRF",
-  "wps_root": "/home/username/WPS",
-  "geog_data_path": "/data/WPS_GEOG",
-  "runtime": {
-    "mode": "local",
-    "wrf_nproc": 4
-  }
-}
-EOF
+# Preview what will be detected
+python3 scripts/wrf_bootstrap.py --dry-run
+
+# Generate config/wrf_env.json from detected local assets
+python3 scripts/wrf_bootstrap.py --output config/wrf_env.json
 ```
 
-**Configuration Explanation:**
-- `wrf_root`: WRF installation directory (containing `main/wrf.exe`)
-- `wps_root`: WPS installation directory (containing `geogrid.exe`, etc.)
-- `geog_data_path`: WPS_GEOG geographic data path
-- `wrf_nproc`: Number of CPU cores for local execution
+`wrf_bootstrap.py` does not install or compile WRF/WPS. It only detects an already-prepared runtime and writes a compatible `config/wrf_env.json`.
+
+Detection order:
+- explicit CLI flags such as `--wrf-dir`, `--wps-dir`, `--geog-data-path`
+- environment variables such as `WRF_DIR`, `WPS_DIR`, `WPS_GEOG`, `WPS_SUPPORT_DIR`
+- repo-local assets under `third_party/`
+- common Linux install paths such as `/opt/wrf`, `/opt/wps`, `/data/WPS_GEOG`
+
+Supported bootstrap profiles:
+- `auto`: choose `wsl_prebuilt` or `linux_prebuilt` from the current host
+- `wsl_prebuilt`: prefer WSL-friendly prebuilt layouts
+- `linux_prebuilt`: prefer standard Linux prebuilt layouts
+- `hpc_template`: detect local WRF/WPS/GEOG paths and also prefill the `hpc` block from `config/wrf_env.hpc.example.json`
+
+Use a bootstrap request file when you want repeatable overrides:
+
+```bash
+cp config/wrf_env.bootstrap.example.json /tmp/wrf_bootstrap.json
+python3 scripts/wrf_bootstrap.py \
+  --bootstrap-config /tmp/wrf_bootstrap.json \
+  --output config/wrf_env.json
+```
+
+Explicit-path example:
+
+```bash
+python3 scripts/wrf_bootstrap.py \
+  --profile linux_prebuilt \
+  --wrf-dir /opt/wrf \
+  --wps-dir /opt/wps \
+  --geog-data-path /data/WPS_GEOG \
+  --wps-support-dir /opt/wps-support \
+  --output config/wrf_env.json
+```
+
+The generated config uses the current runtime schema, including fields such as `wrf_dir`, `wps_dir`, `geog_data_path`, `wrf_run_dir`, `wps_bin_dir`, `local.default_np`, and `wps_tables`.
 
 #### HPC Cluster Configuration
 
-If you want to run on an HPC cluster:
+If you want a local config plus an HPC scaffold in one step:
 
 ```bash
-# 1. Start from example configuration
-cp config/wrf_env.hpc.example.json config/wrf_env.json
+python3 scripts/wrf_bootstrap.py \
+  --profile hpc_template \
+  --output config/wrf_env.json
 
-# 2. Edit configuration file
+# Then edit the generated hpc block for your cluster
 nano config/wrf_env.json
 ```
 
-**HPC Configuration Example (Slurm):**
-
-```json
-{
-  "wrf_root": "/home/username/WRF",
-  "wps_root": "/home/username/WPS",
-  "geog_data_path": "/data/WPS_GEOG",
-  "hpc": {
-    "backend": "slurm",
-    "remote_host": "login.hpc.university.edu",
-    "remote_project_root": "/scratch/username/wrf-projects",
-    "scheduler_ssh_cmd": ["ssh", "-i", "~/.ssh/id_rsa"],
-    "runtime": {
-      "mode": "mpirun",
-      "wrf_nproc": 48,
-      "partition": "compute",
-      "walltime": "06:00:00",
-      "account": "your_account",
-      "modules": ["intel/2021.4", "openmpi/4.1.1", "netcdf/4.8.1"]
-    }
-  }
-}
-```
-
-**HPC Configuration Explanation:**
-- `backend`: Scheduler type (`slurm` or `pbs`)
-- `remote_host`: HPC login node address
-- `remote_project_root`: Project root directory on cluster
-- `scheduler_ssh_cmd`: SSH connection command (optional, defaults to `ssh`)
-- `wrf_nproc`: Number of MPI processes
-- `partition`: Job queue/partition name
-- `walltime`: Maximum runtime
-- `account`: Billing account (if required)
-- `modules`: Environment modules to load
+If you prefer manual editing, `config/wrf_env.hpc.example.json` remains the authoritative cluster template.
 
 ### Step 3: Verify Environment
 
 ```bash
-# Check if WRF/WPS are accessible
-ls -l $(python3 -c "import json; print(json.load(open('config/wrf_env.json'))['wrf_root'])")/main/wrf.exe
+# Human-readable doctor
+bash scripts/check_env.sh config/wrf_env.json
 
-# Check WPS_GEOG data
-ls -l $(python3 -c "import json; print(json.load(open('config/wrf_env.json'))['geog_data_path'])")
+# Machine-readable doctor
+bash scripts/check_env.sh --json config/wrf_env.json
 
 # Test initialization (dry-run)
 python3 scripts/wrf.py init --project-name test_init --dry-run

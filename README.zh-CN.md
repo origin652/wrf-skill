@@ -59,86 +59,78 @@ python3 scripts/wrf.py --version
 
 ### 第二步：配置运行环境
 
-#### 本地运行配置
+#### 一键 Bootstrap
 
-创建 `config/wrf_env.json` 文件：
+推荐直接用脚本生成配置：
 
 ```bash
-# 复制模板（如果有）或手动创建
-cat > config/wrf_env.json << 'EOF'
-{
-  "wrf_root": "/home/username/WRF",
-  "wps_root": "/home/username/WPS",
-  "geog_data_path": "/data/WPS_GEOG",
-  "runtime": {
-    "mode": "local",
-    "wrf_nproc": 4
-  }
-}
-EOF
+# 先预览会探测到什么
+python3 scripts/wrf_bootstrap.py --dry-run
+
+# 自动生成 config/wrf_env.json
+python3 scripts/wrf_bootstrap.py --output config/wrf_env.json
 ```
 
-**配置说明：**
-- `wrf_root`: WRF 安装目录（包含 `main/wrf.exe` 的目录）
-- `wps_root`: WPS 安装目录（包含 `geogrid.exe` 等的目录）
-- `geog_data_path`: WPS_GEOG 地理数据路径
-- `wrf_nproc`: 本地运行使用的 CPU 核心数
+`wrf_bootstrap.py` 不会安装或编译 WRF/WPS，它只负责探测你已经准备好的运行环境，并生成兼容当前项目的 `config/wrf_env.json`。
+
+探测顺序：
+- 命令行显式参数，例如 `--wrf-dir`、`--wps-dir`、`--geog-data-path`
+- 环境变量，例如 `WRF_DIR`、`WPS_DIR`、`WPS_GEOG`、`WPS_SUPPORT_DIR`
+- 仓库内 `third_party/` 下的本地资源
+- 常见 Linux 安装路径，例如 `/opt/wrf`、`/opt/wps`、`/data/WPS_GEOG`
+
+支持的 bootstrap profile：
+- `auto`：根据当前主机自动选择 `wsl_prebuilt` 或 `linux_prebuilt`
+- `wsl_prebuilt`：优先适配 WSL 下常见的预编译目录布局
+- `linux_prebuilt`：优先适配 Linux 下常见的预编译目录布局
+- `hpc_template`：在探测本地 WRF/WPS/GEOG 路径的同时，自动补一个来自 `config/wrf_env.hpc.example.json` 的 `hpc` 模板块
+
+如果你想把覆盖项固化下来，可以使用 bootstrap 请求文件：
+
+```bash
+cp config/wrf_env.bootstrap.example.json /tmp/wrf_bootstrap.json
+python3 scripts/wrf_bootstrap.py \
+  --bootstrap-config /tmp/wrf_bootstrap.json \
+  --output config/wrf_env.json
+```
+
+显式路径示例：
+
+```bash
+python3 scripts/wrf_bootstrap.py \
+  --profile linux_prebuilt \
+  --wrf-dir /opt/wrf \
+  --wps-dir /opt/wps \
+  --geog-data-path /data/WPS_GEOG \
+  --wps-support-dir /opt/wps-support \
+  --output config/wrf_env.json
+```
+
+生成出来的配置会使用当前项目实际运行的字段，包括 `wrf_dir`、`wps_dir`、`geog_data_path`、`wrf_run_dir`、`wps_bin_dir`、`local.default_np` 和 `wps_tables`。
 
 #### HPC 集群配置
 
-如果你要在 HPC 集群上运行：
+如果你想一步生成“本地路径 + HPC 模板”：
 
 ```bash
-# 1. 从示例配置开始
-cp config/wrf_env.hpc.example.json config/wrf_env.json
+python3 scripts/wrf_bootstrap.py \
+  --profile hpc_template \
+  --output config/wrf_env.json
 
-# 2. 编辑配置文件
+# 然后再补你的集群信息
 nano config/wrf_env.json
 ```
 
-**HPC 配置示例（Slurm）：**
-
-```json
-{
-  "wrf_root": "/home/username/WRF",
-  "wps_root": "/home/username/WPS",
-  "geog_data_path": "/data/WPS_GEOG",
-  "hpc": {
-    "backend": "slurm",
-    "remote_host": "login.hpc.university.edu",
-    "remote_project_root": "/scratch/username/wrf-projects",
-    "scheduler_ssh_cmd": ["ssh", "-i", "~/.ssh/id_rsa"],
-    "runtime": {
-      "mode": "mpirun",
-      "wrf_nproc": 48,
-      "partition": "compute",
-      "walltime": "06:00:00",
-      "account": "your_account",
-      "modules": ["intel/2021.4", "openmpi/4.1.1", "netcdf/4.8.1"]
-    }
-  }
-}
-```
-
-**HPC 配置说明：**
-- `backend`: 调度器类型（`slurm` 或 `pbs`）
-- `remote_host`: HPC 登录节点地址
-- `remote_project_root`: 集群上的项目根目录
-- `scheduler_ssh_cmd`: SSH 连接命令（可选，默认为 `ssh`）
-- `wrf_nproc`: 使用的 MPI 进程数
-- `partition`: 作业队列/分区名称
-- `walltime`: 最大运行时间
-- `account`: 计费账户（如果需要）
-- `modules`: 需要加载的环境模块
+如果你更想手工编辑，`config/wrf_env.hpc.example.json` 仍然是集群配置的基准模板。
 
 ### 第三步：验证环境
 
 ```bash
-# 检查 WRF/WPS 是否可访问
-ls -l $(python3 -c "import json; print(json.load(open('config/wrf_env.json'))['wrf_root'])")/main/wrf.exe
+# 人类可读的环境检查
+bash scripts/check_env.sh config/wrf_env.json
 
-# 检查 WPS_GEOG 数据
-ls -l $(python3 -c "import json; print(json.load(open('config/wrf_env.json'))['geog_data_path'])")
+# 机器可读的环境检查
+bash scripts/check_env.sh --json config/wrf_env.json
 
 # 测试初始化（dry-run）
 python3 scripts/wrf.py init --project-name test_init --dry-run

@@ -1,0 +1,19 @@
+{
+  "profile": "auto",
+  "prefer_repo_local": true,
+  "include_hpc_template": false,
+  "python_env": "wrf-env",
+  "geog_data_res": "default",
+  "local": {
+    "default_np": 4,
+    "mpi_cmd": "mpirun"
+  },
+  "paths": {
+    "wrf_dir": "",
+    "wps_dir": "",
+    "geog_data_path": "",
+    "wrf_run_dir": "",
+    "wps_bin_dir": "",
+    "wps_support_dir": ""
+  }
+}
