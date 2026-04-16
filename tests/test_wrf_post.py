@@ -5,10 +5,12 @@ import sys
 import unittest
 import warnings
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from netCDF4 import Dataset
 
+from scripts.chart_wrfout import run_chart_request
 from scripts.plot_wrfout import (
     BinaryOpNode,
     CallNode,
@@ -2666,6 +2668,194 @@ class FigureRenderingTests(unittest.TestCase):
         self.assertEqual(len(sidecar["selected_frames"]), 3)
 
 
+class ChartRenderingTests(unittest.TestCase):
+    def _make_chart_frames(self, runs_dir: Path) -> list[dict[str, Any]]:
+        wrfout_path = runs_dir / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00", "2024-07-20_01:00:00", "2024-07-20_02:00:00"],
+            t2=[
+                np.array([[300.0, 302.0, 304.0, 306.0], [308.0, 310.0, 312.0, 314.0]]),
+                np.array([[301.0, 303.0, 305.0, 307.0], [309.0, 311.0, 313.0, 315.0]]),
+                np.array([[302.0, 304.0, 306.0, 308.0], [310.0, 312.0, 314.0, 316.0]]),
+            ],
+            u10=[np.ones((2, 4)), np.ones((2, 4)), np.ones((2, 4))],
+            v10=[np.ones((2, 4)), np.ones((2, 4)), np.ones((2, 4))],
+            rainc=[np.zeros((2, 4)), np.zeros((2, 4)), np.zeros((2, 4))],
+            rainnc=[np.zeros((2, 4)), np.zeros((2, 4)), np.zeros((2, 4))],
+        )
+        frames = enumerate_wrfout_frames([wrfout_path])
+        return select_wrfout_frames(frames, {"time_indices": [0, 1, 2]})
+
+    def _region_defs(self) -> dict[str, dict[str, Any]]:
+        return {
+            "west_box": {
+                "label": "West Box",
+                "south_north": {"mode": "index_range", "start": 0, "stop": 2},
+                "west_east": {"mode": "index_range", "start": 0, "stop": 2},
+            },
+            "east_box": {
+                "label": "East Box",
+                "south_north": {"mode": "index_range", "start": 0, "stop": 2},
+                "west_east": {"mode": "index_range", "start": 2, "stop": 4},
+            },
+        }
+
+    def test_run_chart_request_supports_line_time_series(self) -> None:
+        runs_dir = make_test_dir("_test_chart_line_time")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        selected_frames = self._make_chart_frames(runs_dir)
+        chart_spec = {
+            "chart_id": "west_mean_t2",
+            "chart_kind": "line",
+            "x": {"mode": "time", "label": "valid_time"},
+            "render": {"format": "png", "title": "West Mean T2", "dpi": 120},
+            "output": {"subdir": "", "file_stem": "west-mean-t2", "sidecar_json": True, "overwrite": True},
+            "series": [
+                {
+                    "series_id": "west_mean",
+                    "label": "West Mean T2",
+                    "layer_id": "t2_c",
+                    "region_id": "west_box",
+                    "reduce": {"mode": "mean"},
+                }
+            ],
+        }
+
+        artifacts = run_chart_request(
+            chart_spec,
+            build_layer_defs(),
+            selected_frames,
+            runs_dir,
+            region_defs=self._region_defs(),
+            dry_run=True,
+        )
+
+        self.assertEqual(len(artifacts), 1)
+        artifact = artifacts[0]
+        self.assertEqual(artifact["chart_kind"], "line")
+        values = [item["value"] for item in artifact["series"][0]["values"]]
+        self.assertEqual([item["label"] for item in artifact["categories"]], [
+            "2024-07-20_00:00:00",
+            "2024-07-20_01:00:00",
+            "2024-07-20_02:00:00",
+        ])
+        self.assertAlmostEqual(float(values[0]), 31.85, places=6)
+        self.assertAlmostEqual(float(values[1]), 32.85, places=6)
+        self.assertAlmostEqual(float(values[2]), 33.85, places=6)
+
+    def test_run_chart_request_supports_grouped_bar_chart(self) -> None:
+        runs_dir = make_test_dir("_test_chart_bar_group")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        selected_frames = self._make_chart_frames(runs_dir)
+        chart_spec = {
+            "chart_id": "grouped_t2",
+            "chart_kind": "bar",
+            "x": {"mode": "group", "group_ids": ["west_box", "east_box"], "label": "region"},
+            "render": {"format": "png", "title": "Grouped T2", "dpi": 120},
+            "output": {"subdir": "", "file_stem": "grouped-t2", "sidecar_json": True, "overwrite": True},
+            "series": [
+                {
+                    "series_id": "group_mean",
+                    "label": "Group Mean T2",
+                    "layer_id": "t2_c",
+                    "reduce": {"mode": "mean"},
+                }
+            ],
+        }
+
+        artifacts = run_chart_request(
+            chart_spec,
+            build_layer_defs(),
+            selected_frames,
+            runs_dir,
+            region_defs=self._region_defs(),
+            dry_run=True,
+        )
+
+        self.assertEqual(len(artifacts), 1)
+        artifact = artifacts[0]
+        values = [item["value"] for item in artifact["series"][0]["values"]]
+        self.assertEqual([item["label"] for item in artifact["categories"]], ["West Box", "East Box"])
+        self.assertAlmostEqual(float(values[0]), 33.85, places=6)
+        self.assertAlmostEqual(float(values[1]), 37.85, places=6)
+
+    def test_run_chart_request_supports_time_boxplot(self) -> None:
+        runs_dir = make_test_dir("_test_chart_boxplot_time")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        selected_frames = self._make_chart_frames(runs_dir)
+        chart_spec = {
+            "chart_id": "time_box_t2",
+            "chart_kind": "boxplot",
+            "x": {"mode": "time", "label": "valid_time"},
+            "render": {"format": "png", "title": "Time Boxplot T2", "dpi": 120},
+            "output": {"subdir": "", "file_stem": "time-box-t2", "sidecar_json": True, "overwrite": True},
+            "series": [
+                {
+                    "series_id": "west_dist",
+                    "label": "West Distribution",
+                    "layer_id": "t2_c",
+                    "region_id": "west_box",
+                }
+            ],
+        }
+
+        artifacts = run_chart_request(
+            chart_spec,
+            build_layer_defs(),
+            selected_frames,
+            runs_dir,
+            region_defs=self._region_defs(),
+            dry_run=True,
+        )
+
+        self.assertEqual(len(artifacts), 1)
+        box = artifacts[0]["series"][0]["boxes"][0]
+        self.assertEqual(int(box["count"]), 4)
+        self.assertAlmostEqual(float(box["median"]), 31.85, places=6)
+        self.assertAlmostEqual(float(box["mean"]), 31.85, places=6)
+
+    def test_run_chart_request_supports_group_boxplot(self) -> None:
+        runs_dir = make_test_dir("_test_chart_boxplot_group")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        selected_frames = self._make_chart_frames(runs_dir)
+        chart_spec = {
+            "chart_id": "group_box_t2",
+            "chart_kind": "boxplot",
+            "x": {"mode": "group", "group_ids": ["west_box", "east_box"], "label": "region"},
+            "render": {"format": "png", "title": "Group Boxplot T2", "dpi": 120},
+            "output": {"subdir": "", "file_stem": "group-box-t2", "sidecar_json": True, "overwrite": True},
+            "series": [
+                {
+                    "series_id": "group_distribution",
+                    "label": "Grouped Distribution",
+                    "layer_id": "t2_c",
+                    "reduce": {"mode": "mean"},
+                }
+            ],
+        }
+
+        artifacts = run_chart_request(
+            chart_spec,
+            build_layer_defs(),
+            selected_frames,
+            runs_dir,
+            region_defs=self._region_defs(),
+            dry_run=True,
+        )
+
+        self.assertEqual(len(artifacts), 1)
+        west_box = artifacts[0]["series"][0]["boxes"][0]
+        east_box = artifacts[0]["series"][0]["boxes"][1]
+        self.assertEqual(int(west_box["count"]), 3)
+        self.assertAlmostEqual(float(west_box["median"]), 32.85, places=6)
+        self.assertAlmostEqual(float(east_box["median"]), 36.85, places=6)
+
+
 class WrfPostProjectTests(unittest.TestCase):
     def test_run_postprocess_recovers_from_prior_post_failure(self) -> None:
         runs_dir = make_test_dir("_test_wrf_post_recover_after_failure")
@@ -2940,6 +3130,110 @@ class WrfPostProjectTests(unittest.TestCase):
         self.assertIn("wrf-post project=real-smoke", log_text)
         self.assertIn("[figure 1] id=real_v3_smoke", log_text)
         self.assertIn(f"output={artifact['path']}", log_text)
+
+    def test_run_postprocess_supports_mixed_figures_and_charts(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_post_figures_and_charts")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        wrfout_path = runs_dir / "demo" / "wrf" / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00", "2024-07-20_01:00:00", "2024-07-20_02:00:00"],
+            t2=[
+                np.array([[300.0, 302.0, 304.0, 306.0], [308.0, 310.0, 312.0, 314.0]]),
+                np.array([[301.0, 303.0, 305.0, 307.0], [309.0, 311.0, 313.0, 315.0]]),
+                np.array([[302.0, 304.0, 306.0, 308.0], [310.0, 312.0, 314.0, 316.0]]),
+            ],
+            u10=[np.ones((2, 4)), np.ones((2, 4)), np.ones((2, 4))],
+            v10=[np.ones((2, 4)), np.ones((2, 4)), np.ones((2, 4))],
+            rainc=[np.zeros((2, 4)), np.zeros((2, 4)), np.zeros((2, 4))],
+            rainnc=[np.zeros((2, 4)), np.zeros((2, 4)), np.zeros((2, 4))],
+            hgt=np.array([[100.0, 150.0, 200.0, 250.0], [120.0, 170.0, 220.0, 270.0]]),
+        )
+        project_root = create_project(runs_dir, "demo", [wrfout_path])
+
+        post_spec_path = project_root / "post_spec.v4.json"
+        post_spec_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 4,
+                    "project_name": "demo",
+                    "style_defs": build_style_defs(),
+                    "layer_defs": build_layer_defs(),
+                    "region_defs": {
+                        "west_box": {
+                            "label": "West Box",
+                            "south_north": {"mode": "index_range", "start": 0, "stop": 2},
+                            "west_east": {"mode": "index_range", "start": 0, "stop": 2},
+                        },
+                        "east_box": {
+                            "label": "East Box",
+                            "south_north": {"mode": "index_range", "start": 0, "stop": 2},
+                            "west_east": {"mode": "index_range", "start": 2, "stop": 4},
+                        },
+                    },
+                    "figures": [
+                        {
+                            "figure_id": "surface_temperature",
+                            "selectors": {"time_indices": [2]},
+                            "render": {"title": "Surface Temperature", "dpi": 120},
+                            "output": {
+                                "subdir": "plots",
+                                "file_stem": "surface-temperature",
+                                "sidecar_json": True,
+                                "overwrite": True,
+                            },
+                            "layers": [
+                                {"layer_id": "t2_c", "style_id": "temperature_raster"},
+                                {"layer_id": "terrain", "style_id": "terrain_contours"},
+                            ],
+                        }
+                    ],
+                    "charts": [
+                        {
+                            "chart_id": "grouped_t2",
+                            "chart_kind": "bar",
+                            "selectors": {"time_indices": [0, 1, 2]},
+                            "x": {"mode": "group", "group_ids": ["west_box", "east_box"], "label": "region"},
+                            "render": {"title": "Grouped T2", "dpi": 120},
+                            "output": {
+                                "subdir": "plots",
+                                "file_stem": "grouped-t2",
+                                "sidecar_json": True,
+                                "overwrite": True,
+                            },
+                            "series": [
+                                {
+                                    "series_id": "group_mean",
+                                    "label": "Group Mean T2",
+                                    "layer_id": "t2_c",
+                                    "reduce": {"mode": "mean"},
+                                }
+                            ],
+                        }
+                    ],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        payload = run_postprocess("demo", runs_dir=runs_dir, post_spec_path=post_spec_path)
+
+        self.assertEqual(len(payload["artifacts"]), 2)
+        state = load_json(project_root / "project.json")
+        self.assertEqual(len(state["artifacts"]["plots"]), 2)
+        chart_artifact = next(item for item in payload["artifacts"] if item.get("chart_id") == "grouped_t2")
+        self.assertTrue(Path(chart_artifact["path"]).exists())
+        chart_sidecar = load_json(Path(chart_artifact["sidecar_path"]))
+        self.assertEqual(chart_sidecar["chart_kind"], "bar")
+        values = [item["value"] for item in chart_sidecar["series"][0]["values"]]
+        self.assertAlmostEqual(float(values[0]), 33.85, places=6)
+        self.assertAlmostEqual(float(values[1]), 37.85, places=6)
+        log_text = Path(payload["log_path"]).read_text(encoding="utf-8")
+        self.assertIn("[figure 1] id=surface_temperature", log_text)
+        self.assertIn("[chart 1] id=grouped_t2", log_text)
 
 
 if __name__ == "__main__":

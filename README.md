@@ -373,6 +373,10 @@ Define visualization needs using `post_spec.json`:
 - Vertical cross-sections (time-height, time-pressure)
 - Path cross-sections (vertical structure along arbitrary paths)
 - Vector field overlays (wind, circulation)
+- Native statistical charts in `schema_version=4`
+  - time-series line charts
+  - grouped bar charts
+  - grouped/time boxplots
 
 ```bash
 # Generate post-processing configuration template
@@ -380,6 +384,9 @@ python3 scripts/post_spec.py --project-name demo --output post_spec.json
 
 # Or use the complete example
 cp templates/post_spec.example.json post_spec.json
+
+# Run project-level post-processing for figures and charts
+python3 scripts/wrf.py post --project-name demo --post-spec post_spec.json
 
 # Render specific figures
 python3 scripts/plot_wrfout.py \
@@ -507,7 +514,7 @@ Then tell Codex:
 
 ## Post-Processing Protocol
 
-WRF Skill uses `schema_version=3` post-processing specification, supporting:
+WRF Skill uses `schema_version=4` post-processing specification for new chart workflows while keeping `schema_version=3` figure-only specs compatible.
 
 ### Layer Definitions (layer_defs)
 - `wrf_native_2d`: 2D native variables
@@ -525,6 +532,15 @@ WRF Skill uses `schema_version=3` post-processing specification, supporting:
 - Contour lines (contour)
 - Categorical fill (categorical)
 - Vector fields (vector/quiver)
+
+### Region Definitions (region_defs, v4)
+- Grid-window region grouping with `bottom_top`, `south_north`, and `west_east`
+- `index_range` selectors use `[start, stop)` semantics
+
+### Statistical Charts (charts, v4)
+- `line + time`: regional time-series such as area-mean temperature
+- `bar + group`: grouped last-frame comparisons across named regions
+- `boxplot + time/group`: spatial distributions by time or time-distribution by region
 
 Full documentation: `docs/post_runtime_v3.md`.
 

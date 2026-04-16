@@ -2,14 +2,15 @@
 
 Status date: 2026-04-10
 
-This document describes the current runnable `schema_version=3` post-processing behavior in this repository.
+This document describes the current runnable figure-oriented `schema_version=3` post-processing behavior in this repository.
+`schema_version=4` now keeps the same figure contract and adds `region_defs` plus `charts` for native statistical graphics.
 It is the companion to:
 
 - `config/post_schema.json` for the machine-readable contract
 - `templates/post_spec.example.json` for a fuller starter spec
 - `docs/post_view_protocol.md` for design notes and future extensions beyond the current validated scope
 
-Phase 6 conclusion in this repository: the currently validated runtime contract is now published as `schema_version=3`.
+Phase 6 conclusion in this repository: the validated figure runtime contract is published as `schema_version=3`, and the current chart extension layer now ships as `schema_version=4`.
 
 ## What Is Stable Today
 
@@ -177,6 +178,9 @@ That template now includes complete runnable examples for:
 - a `time-pressure` column
 - a `distance_km x height_m` scalar path section
 - a path-section vector overlay using native WRF `U`, `V`, and `W`
+- a regional mean temperature line chart
+- a grouped final-frame temperature bar chart
+- a grouped temperature boxplot built from per-frame regional means
 
 Normalize and validate:
 
@@ -204,6 +208,63 @@ Run project-level post-processing:
 
 ```bash
 python3 scripts/wrf_post.py --project-name demo --post-spec runs/demo/post_spec.json
+```
+
+## Statistical Chart Examples (`schema_version=4`)
+
+Regional mean time-series:
+
+```json
+{
+  "chart_id": "west_box_t2_time_mean",
+  "chart_kind": "line",
+  "x": {"mode": "time", "label": "valid_time"},
+  "series": [
+    {
+      "series_id": "west_mean",
+      "label": "West Box Mean T2",
+      "layer_id": "t2_c",
+      "region_id": "west_box",
+      "reduce": {"mode": "mean"}
+    }
+  ]
+}
+```
+
+Grouped last-frame comparison:
+
+```json
+{
+  "chart_id": "grouped_t2_last_frame",
+  "chart_kind": "bar",
+  "x": {"mode": "group", "group_ids": ["west_box", "east_box"], "label": "region"},
+  "series": [
+    {
+      "series_id": "group_mean",
+      "label": "Group Mean T2",
+      "layer_id": "t2_c",
+      "reduce": {"mode": "mean"}
+    }
+  ]
+}
+```
+
+Grouped time-distribution boxplot:
+
+```json
+{
+  "chart_id": "grouped_t2_time_distribution",
+  "chart_kind": "boxplot",
+  "x": {"mode": "group", "group_ids": ["west_box", "east_box"], "label": "region"},
+  "series": [
+    {
+      "series_id": "group_distribution",
+      "label": "Time Distribution of Group Mean T2",
+      "layer_id": "t2_c",
+      "reduce": {"mode": "mean"}
+    }
+  ]
+}
 ```
 
 ## Example View Fragments

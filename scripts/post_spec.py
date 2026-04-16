@@ -13,9 +13,15 @@ try:
 except ImportError:  # pragma: no cover
     from .spec_utils import TIME_FORMAT, deep_merge
 
-DEFAULT_POST_SPEC_VERSION = 3
+DEFAULT_POST_SPEC_VERSION = 4
+SUPPORTED_POST_SPEC_VERSIONS = {3, 4}
 ALLOWED_INPUT_MODES = {"project_artifacts", "explicit_paths", "glob"}
 DEFAULT_SECTION_KEYS = ("inputs", "selectors", "render", "output")
+CHART_SECTION_KEYS = DEFAULT_SECTION_KEYS
+SUPPORTED_CHART_KINDS = {"line", "bar", "boxplot"}
+SUPPORTED_CHART_X_MODES = {"time", "group"}
+SUPPORTED_CHART_REDUCE_MODES = {"mean", "min", "max", "sum"}
+SUPPORTED_REGION_DIMS = {"bottom_top", "south_north", "west_east"}
 SUPPORTED_SOURCE_KINDS = {
     "wrf_native",
     "wrf_native_2d",
@@ -54,6 +60,8 @@ ROOT_RESERVED_KEYS = {
     "view_defs",
     "layer_defs",
     "figures",
+    "region_defs",
+    "charts",
 }
 MAP_VECTOR_PROJECTION_KIND = "map_xy"
 PATH_SECTION_VECTOR_PROJECTION_KIND = "path_section"
@@ -279,6 +287,8 @@ def _empty_post_spec(project_name: str = "demo") -> dict[str, Any]:
         "view_defs": {},
         "layer_defs": {},
         "figures": [],
+        "region_defs": {},
+        "charts": [],
     }
 
 
@@ -292,6 +302,8 @@ def default_post_spec(project_name: str = "demo", *, product_name: str | None = 
         "view_defs": {},
         "layer_defs": default_layer_defs(),
         "figures": [default_figure_spec()],
+        "region_defs": {},
+        "charts": [],
     }
 
 
@@ -509,6 +521,102 @@ def _normalize_figure(
     return normalized
 
 
+def _normalize_region_def(raw_region: Any) -> dict[str, Any]:
+    normalized: dict[str, Any] = {
+        "label": None,
+    }
+    if not isinstance(raw_region, dict):
+        return normalized
+
+    for key, value in raw_region.items():
+        normalized[str(key)] = deepcopy(value)
+    return normalized
+
+
+def _normalize_chart_series(raw_series: Any) -> dict[str, Any]:
+    normalized: dict[str, Any] = {
+        "series_id": None,
+        "label": None,
+        "layer_id": None,
+        "region_id": None,
+        "reduce": {"mode": "mean"},
+    }
+    if not isinstance(raw_series, dict):
+        normalized["series_id"] = str(raw_series)
+        return normalized
+
+    for key, value in raw_series.items():
+        if key not in {"series_id", "label", "layer_id", "region_id", "reduce"}:
+            normalized[key] = deepcopy(value)
+    normalized["series_id"] = raw_series.get("series_id")
+    normalized["label"] = raw_series.get("label")
+    normalized["layer_id"] = raw_series.get("layer_id")
+    normalized["region_id"] = raw_series.get("region_id")
+
+    reduce_cfg = raw_series.get("reduce")
+    if isinstance(reduce_cfg, dict):
+        normalized["reduce"] = deep_merge(normalized["reduce"], reduce_cfg)
+    elif reduce_cfg is not None:
+        normalized["reduce"] = deepcopy(reduce_cfg)
+    return normalized
+
+
+def _normalize_chart(raw_chart: Any, defaults: dict[str, Any]) -> dict[str, Any]:
+    base = {
+        "chart_id": None,
+        "chart_kind": None,
+        "inputs": deep_merge(default_post_defaults()["inputs"], defaults.get("inputs", {})),
+        "selectors": deep_merge(
+            default_post_defaults()["selectors"],
+            defaults.get("selectors", {}),
+        ),
+        "render": deep_merge(default_post_defaults()["render"], defaults.get("render", {})),
+        "output": deep_merge(default_post_defaults()["output"], defaults.get("output", {})),
+        "x": {
+            "mode": "time",
+            "group_ids": [],
+            "label": None,
+        },
+        "series": [],
+    }
+    if not isinstance(raw_chart, dict):
+        base["chart_id"] = str(raw_chart)
+        return base
+
+    normalized: dict[str, Any] = {
+        key: deepcopy(value)
+        for key, value in raw_chart.items()
+        if key not in {"chart_id", "chart_kind", *CHART_SECTION_KEYS, "x", "series"}
+    }
+    normalized["chart_id"] = raw_chart.get("chart_id")
+    normalized["chart_kind"] = raw_chart.get("chart_kind")
+
+    for section in CHART_SECTION_KEYS:
+        merged = deepcopy(base[section])
+        raw_value = raw_chart.get(section)
+        if isinstance(raw_value, dict):
+            normalized[section] = deep_merge(merged, raw_value)
+        elif raw_value is None:
+            normalized[section] = merged
+        else:
+            normalized[section] = deepcopy(raw_value)
+
+    x_cfg = raw_chart.get("x")
+    if isinstance(x_cfg, dict):
+        normalized["x"] = deep_merge(base["x"], x_cfg)
+    elif x_cfg is None:
+        normalized["x"] = deepcopy(base["x"])
+    else:
+        normalized["x"] = deepcopy(x_cfg)
+
+    raw_series = raw_chart.get("series")
+    if isinstance(raw_series, list):
+        normalized["series"] = [_normalize_chart_series(item) for item in raw_series]
+    else:
+        normalized["series"] = []
+    return normalized
+
+
 def normalize_post_spec(
     spec: dict[str, Any],
     *,
@@ -561,6 +669,20 @@ def normalize_post_spec(
         normalized["figures"] = [
             _normalize_figure(item, defaults, style_defs)
             for item in raw_figures
+        ]
+
+    raw_region_defs = incoming.get("region_defs")
+    if isinstance(raw_region_defs, dict):
+        normalized["region_defs"] = {
+            str(region_id): _normalize_region_def(region_def)
+            for region_id, region_def in raw_region_defs.items()
+        }
+
+    raw_charts = incoming.get("charts")
+    if isinstance(raw_charts, list):
+        normalized["charts"] = [
+            _normalize_chart(item, defaults)
+            for item in raw_charts
         ]
 
     if (
@@ -702,6 +824,50 @@ def _validate_output(output: Any, prefix: str, errors: list[str]) -> None:
         value = output.get(key)
         if not isinstance(value, bool):
             errors.append(f"{prefix}.{key} must be a boolean")
+
+
+def _validate_region_def(region_id: str, region_def: Any, errors: list[str]) -> None:
+    prefix = f"region_defs.{region_id}"
+    if not region_id.strip():
+        errors.append("region_defs keys must be non-empty strings")
+        return
+    if not isinstance(region_def, dict):
+        errors.append(f"{prefix} must be an object")
+        return
+
+    label = region_def.get("label")
+    if label is not None and (not isinstance(label, str) or not label.strip()):
+        errors.append(f"{prefix}.label must be a non-empty string or null")
+
+    selector_count = 0
+    for dim, selector in region_def.items():
+        if dim == "label":
+            continue
+        selector_prefix = f"{prefix}.{dim}"
+        if dim not in SUPPORTED_REGION_DIMS:
+            errors.append(
+                f"{selector_prefix} uses unsupported dimension, expected one of "
+                f"{', '.join(sorted(SUPPORTED_REGION_DIMS))}"
+            )
+            continue
+        selector_count += 1
+        if not isinstance(selector, dict):
+            errors.append(f"{selector_prefix} must be an object")
+            continue
+        mode = selector.get("mode")
+        if mode != "index_range":
+            errors.append(f"{selector_prefix}.mode must equal index_range")
+        start = selector.get("start")
+        stop = selector.get("stop")
+        if not isinstance(start, int) or start < 0:
+            errors.append(f"{selector_prefix}.start must be a non-negative integer")
+        if not isinstance(stop, int) or stop < 1:
+            errors.append(f"{selector_prefix}.stop must be a positive integer")
+        if isinstance(start, int) and isinstance(stop, int) and start >= stop:
+            errors.append(f"{selector_prefix}.stop must be greater than {selector_prefix}.start")
+
+    if selector_count == 0:
+        errors.append(f"{prefix} must define at least one dimension selector")
 
 
 def _validate_layer_def(layer_id: str, layer_def: Any, errors: list[str]) -> None:
@@ -1122,12 +1288,140 @@ def _render_layer_target_ids(render_layer: dict[str, Any]) -> list[str]:
     return []
 
 
+def _validate_chart_x(x_cfg: Any, prefix: str, region_defs: dict[str, Any], errors: list[str]) -> str:
+    if not isinstance(x_cfg, dict):
+        errors.append(f"{prefix} must be an object")
+        return ""
+
+    mode = x_cfg.get("mode")
+    if not isinstance(mode, str) or mode not in SUPPORTED_CHART_X_MODES:
+        errors.append(f"{prefix}.mode must be one of {', '.join(sorted(SUPPORTED_CHART_X_MODES))}")
+        mode = ""
+
+    label = x_cfg.get("label")
+    if label is not None and (not isinstance(label, str) or not label.strip()):
+        errors.append(f"{prefix}.label must be a non-empty string or null")
+
+    group_ids = x_cfg.get("group_ids")
+    if mode == "group":
+        if not isinstance(group_ids, list) or not group_ids:
+            errors.append(f"{prefix}.group_ids must be a non-empty list when x.mode=group")
+        else:
+            for index, group_id in enumerate(group_ids):
+                item_prefix = f"{prefix}.group_ids[{index}]"
+                if not isinstance(group_id, str) or not group_id.strip():
+                    errors.append(f"{item_prefix} must be a non-empty string")
+                elif group_id not in region_defs:
+                    errors.append(f"{item_prefix} references unknown region_defs key: {group_id}")
+    elif group_ids not in (None, []):
+        errors.append(f"{prefix}.group_ids is only valid when x.mode=group")
+
+    return mode
+
+
+def _validate_chart_series(
+    series: Any,
+    prefix: str,
+    *,
+    chart_kind: str,
+    x_mode: str,
+    layer_defs: dict[str, Any],
+    region_defs: dict[str, Any],
+    errors: list[str],
+) -> None:
+    if not isinstance(series, dict):
+        errors.append(f"{prefix} must be an object")
+        return
+
+    for key in ("series_id", "label", "layer_id"):
+        value = series.get(key)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{prefix}.{key} must be a non-empty string")
+
+    layer_id = series.get("layer_id")
+    if isinstance(layer_id, str) and layer_id not in layer_defs:
+        errors.append(f"{prefix}.layer_id references unknown layer_defs key: {layer_id}")
+
+    region_id = series.get("region_id")
+    if x_mode == "group":
+        if region_id is not None:
+            errors.append(f"{prefix}.region_id is only valid when x.mode=time")
+    elif region_id is not None:
+        if not isinstance(region_id, str) or not region_id.strip():
+            errors.append(f"{prefix}.region_id must be a non-empty string or null")
+        elif region_id not in region_defs:
+            errors.append(f"{prefix}.region_id references unknown region_defs key: {region_id}")
+
+    reduce_cfg = series.get("reduce")
+    if reduce_cfg is not None and not isinstance(reduce_cfg, dict):
+        errors.append(f"{prefix}.reduce must be an object or null")
+        reduce_cfg = None
+    reduce_mode = reduce_cfg.get("mode") if isinstance(reduce_cfg, dict) else None
+
+    requires_reduce = chart_kind in {"line", "bar"} or (chart_kind == "boxplot" and x_mode == "group")
+    if requires_reduce:
+        if not isinstance(reduce_mode, str) or reduce_mode not in SUPPORTED_CHART_REDUCE_MODES:
+            errors.append(
+                f"{prefix}.reduce.mode must be one of {', '.join(sorted(SUPPORTED_CHART_REDUCE_MODES))}"
+            )
+
+
+def _validate_chart(
+    chart: Any,
+    prefix: str,
+    *,
+    layer_defs: dict[str, Any],
+    region_defs: dict[str, Any],
+    errors: list[str],
+) -> None:
+    if not isinstance(chart, dict):
+        errors.append(f"{prefix} must be an object")
+        return
+
+    chart_id = chart.get("chart_id")
+    if not isinstance(chart_id, str) or not chart_id.strip():
+        errors.append(f"{prefix}.chart_id must be a non-empty string")
+
+    chart_kind = chart.get("chart_kind")
+    if not isinstance(chart_kind, str) or chart_kind not in SUPPORTED_CHART_KINDS:
+        errors.append(f"{prefix}.chart_kind must be one of {', '.join(sorted(SUPPORTED_CHART_KINDS))}")
+        chart_kind = ""
+
+    _validate_inputs(chart.get("inputs"), f"{prefix}.inputs", errors)
+    _validate_selectors(chart.get("selectors"), f"{prefix}.selectors", errors)
+    _validate_render(chart.get("render"), f"{prefix}.render", errors)
+    _validate_output(chart.get("output"), f"{prefix}.output", errors)
+
+    x_mode = _validate_chart_x(chart.get("x"), f"{prefix}.x", region_defs, errors)
+    if chart_kind == "line" and x_mode != "time":
+        errors.append(f"{prefix} chart_kind=line currently requires x.mode=time")
+    if chart_kind == "bar" and x_mode != "group":
+        errors.append(f"{prefix} chart_kind=bar currently requires x.mode=group")
+
+    series = chart.get("series")
+    if not isinstance(series, list) or not series:
+        errors.append(f"{prefix}.series must be a non-empty list")
+        return
+    for series_index, item in enumerate(series):
+        _validate_chart_series(
+            item,
+            f"{prefix}.series[{series_index}]",
+            chart_kind=chart_kind,
+            x_mode=x_mode,
+            layer_defs=layer_defs,
+            region_defs=region_defs,
+            errors=errors,
+        )
+
+
 def validate_post_spec(spec: dict[str, Any]) -> list[str]:
     errors: list[str] = []
 
     schema_version = spec.get("schema_version")
-    if schema_version != DEFAULT_POST_SPEC_VERSION:
-        errors.append(f"schema_version must equal {DEFAULT_POST_SPEC_VERSION}")
+    if schema_version not in SUPPORTED_POST_SPEC_VERSIONS:
+        errors.append(
+            f"schema_version must be one of {', '.join(str(item) for item in sorted(SUPPORTED_POST_SPEC_VERSIONS))}"
+        )
 
     project_name = spec.get("project_name")
     if not isinstance(project_name, str) or not project_name.strip():
@@ -1164,8 +1458,39 @@ def validate_post_spec(spec: dict[str, Any]) -> list[str]:
             _validate_layer_def(str(layer_id), layer_def, errors)
 
     figures = spec.get("figures")
-    if not isinstance(figures, list) or not figures:
-        errors.append("figures must be a non-empty list")
+    if figures is None:
+        figures = []
+    elif not isinstance(figures, list):
+        errors.append("figures must be a list when provided")
+        figures = []
+
+    region_defs = spec.get("region_defs")
+    if region_defs is None:
+        region_defs = {}
+    elif not isinstance(region_defs, dict):
+        errors.append("region_defs must be an object when provided")
+        region_defs = {}
+    else:
+        for region_id, region_def in region_defs.items():
+            _validate_region_def(str(region_id), region_def, errors)
+
+    charts = spec.get("charts")
+    if charts is None:
+        charts = []
+    elif not isinstance(charts, list):
+        errors.append("charts must be a list when provided")
+        charts = []
+
+    if schema_version == 3:
+        if region_defs:
+            errors.append("region_defs is only supported when schema_version=4")
+        if charts:
+            errors.append("charts is only supported when schema_version=4")
+        if not figures:
+            errors.append("figures must be a non-empty list")
+            return errors
+    elif schema_version == 4 and not figures and not charts:
+        errors.append("at least one of figures or charts must be a non-empty list")
         return errors
 
     for figure_index, figure in enumerate(figures):
@@ -1292,6 +1617,15 @@ def validate_post_spec(spec: dict[str, Any]) -> list[str]:
                     if layer.get(component_key) is not None:
                         errors.append(f"{layer_prefix}.{component_key} is only valid when draw.kind=vector")
 
+    for chart_index, chart in enumerate(charts):
+        _validate_chart(
+            chart,
+            f"charts[{chart_index}]",
+            layer_defs=layer_defs,
+            region_defs=region_defs,
+            errors=errors,
+        )
+
     return errors
 
 
@@ -1372,6 +1706,7 @@ def interpret_post_spec(
     runtime = _runtime_symbols()
     view_defs = normalized.get("view_defs") if isinstance(normalized.get("view_defs"), dict) else {}
     layer_defs = normalized["layer_defs"]
+    region_defs = normalized.get("region_defs") if isinstance(normalized.get("region_defs"), dict) else {}
     known_layers = set(layer_defs)
     interpreted_figures: list[dict[str, Any]] = []
     for figure in figures:
@@ -1491,6 +1826,7 @@ def interpret_post_spec(
         "project_name": normalized["project_name"],
         "style_defs": deepcopy(normalized.get("style_defs") or {}),
         "view_defs": deepcopy(normalized.get("view_defs") or {}),
+        "region_defs": deepcopy(region_defs),
         "layer_defs": {
             layer_id: {
                 "expr": layer_def.get("expr"),
@@ -1501,6 +1837,7 @@ def interpret_post_spec(
             for layer_id, layer_def in layer_defs.items()
         },
         "figures": interpreted_figures,
+        "charts": deepcopy(normalized.get("charts") or []),
     }
 
 

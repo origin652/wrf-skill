@@ -24,10 +24,10 @@ def make_test_dir(name: str) -> Path:
 
 
 class PostSpecTests(unittest.TestCase):
-    def test_default_post_spec_uses_v3_layers_shape(self) -> None:
+    def test_default_post_spec_uses_v4_layers_shape(self) -> None:
         payload = default_post_spec("demo")
 
-        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(payload["schema_version"], 4)
         self.assertEqual(payload["project_name"], "demo")
         self.assertEqual(payload["defaults"]["render"]["format"], "png")
         self.assertIn("temperature_raster", payload["style_defs"])
@@ -40,6 +40,110 @@ class PostSpecTests(unittest.TestCase):
         self.assertEqual(payload["figures"][0]["figure_id"], "surface_temperature")
         self.assertEqual(payload["figures"][0]["layers"][0]["layer_id"], "t2_c")
         self.assertEqual(payload["figures"][0]["layers"][0]["style_id"], "temperature_raster")
+        self.assertEqual(payload["region_defs"], {})
+        self.assertEqual(payload["charts"], [])
+
+    def test_normalize_supports_region_defs_and_charts(self) -> None:
+        payload = normalize_post_spec(
+            {
+                "schema_version": 4,
+                "project_name": "stats-demo",
+                "layer_defs": {
+                    "t2_c": {"expr": "T2 - 273.15", "units": "C"},
+                },
+                "figures": [],
+                "region_defs": {
+                    "west_box": {
+                        "label": "West Box",
+                        "south_north": {"mode": "index_range", "start": 0, "stop": 2},
+                        "west_east": {"mode": "index_range", "start": 0, "stop": 3},
+                    }
+                },
+                "charts": [
+                    {
+                        "chart_id": "t2_line",
+                        "chart_kind": "line",
+                        "x": {"mode": "time", "label": "valid_time"},
+                        "series": [
+                            {
+                                "series_id": "west_mean",
+                                "label": "West Mean T2",
+                                "layer_id": "t2_c",
+                                "region_id": "west_box",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(payload["region_defs"]["west_box"]["label"], "West Box")
+        self.assertEqual(payload["charts"][0]["chart_kind"], "line")
+        self.assertEqual(payload["charts"][0]["x"]["mode"], "time")
+        self.assertEqual(payload["charts"][0]["series"][0]["reduce"]["mode"], "mean")
+
+    def test_validate_accepts_v3_figure_only_specs(self) -> None:
+        payload = normalize_post_spec(
+            {
+                "schema_version": 3,
+                "project_name": "legacy-demo",
+                "layer_defs": {
+                    "t2_c": {"expr": "T2 - 273.15", "units": "C"},
+                },
+                "figures": [
+                    {
+                        "figure_id": "surface_t2",
+                        "layers": [
+                            {
+                                "layer_id": "t2_c",
+                                "draw": {"kind": "raster", "style": {}},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(validate_post_spec(payload), [])
+
+    def test_validate_rejects_invalid_v4_chart_protocol(self) -> None:
+        payload = normalize_post_spec(
+            {
+                "schema_version": 4,
+                "project_name": "bad-stats",
+                "layer_defs": {
+                    "t2_c": {"expr": "T2 - 273.15", "units": "C"},
+                },
+                "figures": [],
+                "region_defs": {
+                    "bad_box": {
+                        "south_north": {"mode": "index_range", "start": 2, "stop": 2},
+                    }
+                },
+                "charts": [
+                    {
+                        "chart_id": "bad_line",
+                        "chart_kind": "line",
+                        "x": {"mode": "group", "group_ids": ["missing_box"]},
+                        "series": [
+                            {
+                                "series_id": "line_1",
+                                "label": "Bad Line",
+                                "layer_id": "t2_c",
+                                "region_id": "bad_box",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        errors = validate_post_spec(payload)
+
+        self.assertTrue(any("region_defs.bad_box.south_north.stop must be greater" in error for error in errors))
+        self.assertTrue(any("missing_box" in error for error in errors))
+        self.assertTrue(any("chart_kind=line currently requires x.mode=time" in error for error in errors))
+        self.assertTrue(any(".region_id is only valid when x.mode=time" in error for error in errors))
 
     def test_normalize_merges_global_defaults_into_each_figure(self) -> None:
         payload = normalize_post_spec(
@@ -974,7 +1078,7 @@ class PostSpecTests(unittest.TestCase):
 
         self.assertTrue(any("explicit_paths" in error for error in errors))
 
-    def test_cli_writes_normalized_v2_spec(self) -> None:
+    def test_cli_writes_normalized_v4_spec(self) -> None:
         runs_dir = make_test_dir("_test_post_spec_cli")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
 
@@ -1025,7 +1129,7 @@ class PostSpecTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(output_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(payload["schema_version"], 4)
         self.assertEqual(payload["figures"][0]["render"]["dpi"], 240)
         self.assertEqual(payload["figures"][0]["layers"][0]["layer_id"], "wind10m")
 

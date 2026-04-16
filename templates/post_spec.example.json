@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "project_name": "demo",
   "defaults": {
     "inputs": {
@@ -356,6 +356,34 @@
       }
     }
   },
+  "region_defs": {
+    "west_box": {
+      "label": "West Box",
+      "south_north": {
+        "mode": "index_range",
+        "start": 0,
+        "stop": 80
+      },
+      "west_east": {
+        "mode": "index_range",
+        "start": 0,
+        "stop": 80
+      }
+    },
+    "east_box": {
+      "label": "East Box",
+      "south_north": {
+        "mode": "index_range",
+        "start": 0,
+        "stop": 80
+      },
+      "west_east": {
+        "mode": "index_range",
+        "start": 80,
+        "stop": 160
+      }
+    }
+  },
   "figures": [
     {
       "figure_id": "surface_temperature",
@@ -642,6 +670,110 @@
           "v_layer_id": "v_mass",
           "vertical_layer_id": "w_mass",
           "style_id": "section_wind_quiver"
+        }
+      ]
+    }
+  ],
+  "charts": [
+    {
+      "chart_id": "west_box_t2_time_mean",
+      "chart_kind": "line",
+      "selectors": {
+        "time_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "x": {
+        "mode": "time",
+        "label": "valid_time"
+      },
+      "render": {
+        "title": "West Box Mean 2m Temperature"
+      },
+      "output": {
+        "file_stem": "west-box-t2-time-mean"
+      },
+      "series": [
+        {
+          "series_id": "west_mean",
+          "label": "West Box Mean T2",
+          "layer_id": "t2_c",
+          "region_id": "west_box",
+          "reduce": {
+            "mode": "mean"
+          }
+        }
+      ]
+    },
+    {
+      "chart_id": "grouped_t2_last_frame",
+      "chart_kind": "bar",
+      "selectors": {
+        "time_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "x": {
+        "mode": "group",
+        "group_ids": [
+          "west_box",
+          "east_box"
+        ],
+        "label": "region"
+      },
+      "render": {
+        "title": "Grouped 2m Temperature at Final Frame"
+      },
+      "output": {
+        "file_stem": "grouped-t2-last-frame"
+      },
+      "series": [
+        {
+          "series_id": "group_mean",
+          "label": "Group Mean T2",
+          "layer_id": "t2_c",
+          "reduce": {
+            "mode": "mean"
+          }
+        }
+      ]
+    },
+    {
+      "chart_id": "grouped_t2_time_distribution",
+      "chart_kind": "boxplot",
+      "selectors": {
+        "time_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "x": {
+        "mode": "group",
+        "group_ids": [
+          "west_box",
+          "east_box"
+        ],
+        "label": "region"
+      },
+      "render": {
+        "title": "Grouped Time Distribution of Mean 2m Temperature"
+      },
+      "output": {
+        "file_stem": "grouped-t2-time-distribution"
+      },
+      "series": [
+        {
+          "series_id": "group_distribution",
+          "label": "Time Distribution of Group Mean T2",
+          "layer_id": "t2_c",
+          "reduce": {
+            "mode": "mean"
+          }
         }
       ]
     }

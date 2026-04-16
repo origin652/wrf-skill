@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from chart_wrfout import run_chart_request
     from plot_wrfout import (
         enumerate_wrfout_frames,
         infer_domain_from_path,
@@ -25,6 +26,7 @@ try:
         transition,
     )
 except ImportError:  # pragma: no cover
+    from .chart_wrfout import run_chart_request
     from .plot_wrfout import (
         enumerate_wrfout_frames,
         infer_domain_from_path,
@@ -229,6 +231,37 @@ def run_postprocess(
                 selected_frames,
                 output_dir,
                 view_defs=spec.get("view_defs"),
+                dry_run=dry_run,
+            )
+            for artifact in artifacts:
+                generated.append(artifact)
+                lines.append(f"output={artifact['path']}")
+                if not dry_run:
+                    register_artifact(state, "plots", artifact["path"])
+
+        for index, chart_spec in enumerate(spec.get("charts", []), start=1):
+            input_paths = resolve_input_paths(chart_spec, state, project_dir=project_dir)
+            if not input_paths:
+                raise FileNotFoundError(
+                    f"No input files resolved for chart {chart_spec['chart_id']}"
+                )
+
+            frames = enumerate_wrfout_frames(input_paths)
+            selected_frames = select_wrfout_frames(frames, chart_spec.get("selectors"))
+            if not selected_frames:
+                raise ValueError(
+                    f"No frames selected for chart {chart_spec['chart_id']} after applying selectors"
+                )
+
+            lines.append(
+                f"[chart {index}] id={chart_spec['chart_id']} inputs={len(input_paths)} frames={len(selected_frames)}"
+            )
+            artifacts = run_chart_request(
+                chart_spec,
+                spec["layer_defs"],
+                selected_frames,
+                output_dir,
+                region_defs=spec.get("region_defs"),
                 dry_run=dry_run,
             )
             for artifact in artifacts:

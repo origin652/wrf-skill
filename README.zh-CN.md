@@ -373,6 +373,10 @@ python3 scripts/wrf.py config \
 - 垂直剖面（时间-高度、时间-气压）
 - 路径剖面（任意路径的垂直结构）
 - 矢量场叠加（风场、环流）
+- `schema_version=4` 原生统计图
+  - 时间序列折线图
+  - 分组柱状图
+  - 分组/逐时箱线图
 
 ```bash
 # 生成后处理配置模板
@@ -380,6 +384,9 @@ python3 scripts/post_spec.py --project-name demo --output post_spec.json
 
 # 或使用完整示例
 cp templates/post_spec.example.json post_spec.json
+
+# 按项目运行图场和统计图后处理
+python3 scripts/wrf.py post --project-name demo --post-spec post_spec.json
 
 # 渲染指定图形
 python3 scripts/plot_wrfout.py \
@@ -507,7 +514,7 @@ bash scripts/install_codex_skills.sh
 
 ## 后处理协议
 
-WRF Skill 使用 `schema_version=3` 的后处理规范，支持：
+WRF Skill 对新增统计图工作流使用 `schema_version=4` 后处理规范，同时继续兼容 `schema_version=3` 的 figure-only 规范。
 
 ### 数据层定义 (layer_defs)
 - `wrf_native_2d`: 2D 原生变量
@@ -525,6 +532,15 @@ WRF Skill 使用 `schema_version=3` 的后处理规范，支持：
 - 等值线 (contour)
 - 分类填色 (categorical)
 - 矢量场 (vector/quiver)
+
+### 区域定义 (region_defs, v4)
+- 通过 `bottom_top`、`south_north`、`west_east` 做规则网格窗口分组
+- `index_range` 采用 `[start, stop)` 语义
+
+### 统计图 (charts, v4)
+- `line + time`：区域平均等时间序列
+- `bar + group`：多个命名区域的末时次对比
+- `boxplot + time/group`：逐时空间分布或按区域的时间分布
 
 完整文档见 `docs/post_runtime_v3.zh-CN.md`。
 

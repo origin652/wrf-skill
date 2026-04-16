@@ -4,12 +4,14 @@
   "type": "object",
   "required": [
     "schema_version",
-    "layer_defs",
-    "figures"
+    "layer_defs"
   ],
   "properties": {
     "schema_version": {
-      "const": 3
+      "enum": [
+        3,
+        4
+      ]
     },
     "project_name": {
       "type": "string",
@@ -37,14 +39,47 @@
         "$ref": "#/$defs/layer_def"
       }
     },
+    "region_defs": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/region_def"
+      }
+    },
     "figures": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "$ref": "#/$defs/figure"
       }
+    },
+    "charts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/chart"
+      }
     }
   },
+  "anyOf": [
+    {
+      "properties": {
+        "figures": {
+          "minItems": 1
+        }
+      },
+      "required": [
+        "figures"
+      ]
+    },
+    {
+      "properties": {
+        "charts": {
+          "minItems": 1
+        }
+      },
+      "required": [
+        "charts"
+      ]
+    }
+  ],
   "additionalProperties": true,
   "$defs": {
     "time_token": {
@@ -848,6 +883,175 @@
           "minItems": 1,
           "items": {
             "$ref": "#/$defs/render_layer"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "region_selector": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "const": "index_range"
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stop": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "mode",
+        "start",
+        "stop"
+      ],
+      "additionalProperties": true
+    },
+    "region_def": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bottom_top": {
+          "$ref": "#/$defs/region_selector"
+        },
+        "south_north": {
+          "$ref": "#/$defs/region_selector"
+        },
+        "west_east": {
+          "$ref": "#/$defs/region_selector"
+        }
+      },
+      "additionalProperties": true
+    },
+    "chart_reduce": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "mean",
+            "min",
+            "max",
+            "sum"
+          ]
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "additionalProperties": true
+    },
+    "chart_series": {
+      "type": "object",
+      "required": [
+        "series_id",
+        "label",
+        "layer_id"
+      ],
+      "properties": {
+        "series_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "layer_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "region_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "reduce": {
+          "$ref": "#/$defs/chart_reduce"
+        }
+      },
+      "additionalProperties": true
+    },
+    "chart_x": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "time",
+            "group"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "chart": {
+      "type": "object",
+      "required": [
+        "chart_id",
+        "chart_kind",
+        "x",
+        "series"
+      ],
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "chart_kind": {
+          "type": "string",
+          "enum": [
+            "line",
+            "bar",
+            "boxplot"
+          ]
+        },
+        "inputs": {
+          "$ref": "#/$defs/inputs"
+        },
+        "selectors": {
+          "$ref": "#/$defs/partial_selectors"
+        },
+        "render": {
+          "$ref": "#/$defs/partial_render"
+        },
+        "output": {
+          "$ref": "#/$defs/partial_output"
+        },
+        "x": {
+          "$ref": "#/$defs/chart_x"
+        },
+        "series": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/chart_series"
           }
         }
       },

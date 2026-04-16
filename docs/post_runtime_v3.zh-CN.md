@@ -2,14 +2,15 @@
 
 状态日期：2026-04-10
 
-这篇文档描述的是这个仓库里当前可直接运行的 `schema_version=3` 后处理行为。
+这篇文档描述的是这个仓库里当前可直接运行、以 figure 为核心的 `schema_version=3` 后处理行为。
+现在 `schema_version=4` 在保留这套 figure 合同的同时，又新增了 `region_defs` 和 `charts` 原生统计图能力。
 它和下面几份文件配套：
 
 - `config/post_schema.json`：可机读协议
 - `templates/post_spec.example.json`：更完整的起始示例
 - `docs/post_view_protocol.zh-CN.md`：当前设计说明和超出已验证范围之后的后续扩展方向
 
-这个仓库在阶段 6 的结论是：当前已验证的 runtime 合同现在正式发布为 `schema_version=3`。
+这个仓库在阶段 6 的结论是：已验证的 figure runtime 合同正式发布为 `schema_version=3`，当前统计图扩展层则发布为 `schema_version=4`。
 
 ## 现在稳定可用的部分
 
@@ -177,6 +178,9 @@ cp templates/post_spec.example.json post_spec.json
 - 一个 `time-pressure` 柱状截面
 - 一个 `distance_km x height_m` 标量路径剖面
 - 一个基于原生 WRF `U`、`V`、`W` 的路径截面矢量叠加
+- 一个区域平均气温折线图
+- 一个按区域分组的末时次气温柱状图
+- 一个按区域分组的逐时均值箱线图
 
 规范化并校验：
 
@@ -204,6 +208,63 @@ python3 scripts/plot_wrfout.py \
 
 ```bash
 python3 scripts/wrf_post.py --project-name demo --post-spec runs/demo/post_spec.json
+```
+
+## 统计图片段示例（`schema_version=4`）
+
+区域平均时间序列：
+
+```json
+{
+  "chart_id": "west_box_t2_time_mean",
+  "chart_kind": "line",
+  "x": {"mode": "time", "label": "valid_time"},
+  "series": [
+    {
+      "series_id": "west_mean",
+      "label": "West Box Mean T2",
+      "layer_id": "t2_c",
+      "region_id": "west_box",
+      "reduce": {"mode": "mean"}
+    }
+  ]
+}
+```
+
+按区域分组的末时次对比：
+
+```json
+{
+  "chart_id": "grouped_t2_last_frame",
+  "chart_kind": "bar",
+  "x": {"mode": "group", "group_ids": ["west_box", "east_box"], "label": "region"},
+  "series": [
+    {
+      "series_id": "group_mean",
+      "label": "Group Mean T2",
+      "layer_id": "t2_c",
+      "reduce": {"mode": "mean"}
+    }
+  ]
+}
+```
+
+按区域分组的时间分布箱线图：
+
+```json
+{
+  "chart_id": "grouped_t2_time_distribution",
+  "chart_kind": "boxplot",
+  "x": {"mode": "group", "group_ids": ["west_box", "east_box"], "label": "region"},
+  "series": [
+    {
+      "series_id": "group_distribution",
+      "label": "Time Distribution of Group Mean T2",
+      "layer_id": "t2_c",
+      "reduce": {"mode": "mean"}
+    }
+  ]
+}
 ```
 
 ## 视图片段示例
