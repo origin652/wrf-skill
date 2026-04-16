@@ -39,6 +39,10 @@ ALLOWED_TRANSITIONS = {
 }
 
 
+def posix_path(path: Path | str) -> str:
+    return posix(path)
+
+
 def simulation_spec_template(project_name: str) -> dict[str, Any]:
     return default_spec(project_name)
 

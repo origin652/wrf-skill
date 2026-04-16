@@ -38,19 +38,22 @@ except ImportError:  # pragma: no cover
     from .render_config import render_from_spec, validate_spec, write_rendered_targets
     from .spec_utils import deep_merge, default_forcing_interval_seconds, normalize_spec
     from .utils import coerce_value as coerce_override_value, dump_json, load_json, posix_path
+
+
 def sync_interval_defaults_for_source(spec: dict[str, Any], previous_source: str, next_source: str) -> None:
-    if lowered == "null":
-        return None
-    try:
-        return json.loads(raw_value)
-    except json.JSONDecodeError:
-        pass
-    for caster in (int, float):
-        try:
-            return caster(raw_value)
-        except ValueError:
-            continue
-    return raw_value
+    previous_default = default_forcing_interval_seconds(previous_source)
+    next_default = default_forcing_interval_seconds(next_source)
+
+    timing = spec.setdefault("timing", {})
+    share = spec.setdefault("wps", {}).setdefault("share", {})
+
+    current_timing = timing.get("forcing_interval_seconds")
+    current_share = share.get("interval_seconds")
+
+    if current_timing is None or int(current_timing) == int(previous_default):
+        timing["forcing_interval_seconds"] = int(next_default)
+    if current_share is None or int(current_share) == int(previous_default):
+        share["interval_seconds"] = int(next_default)
 
 
 def parse_time_token(value: str) -> str:
