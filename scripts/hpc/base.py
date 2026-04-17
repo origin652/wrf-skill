@@ -328,9 +328,39 @@ def hpc_wps_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     return runtime
 
 
+def hpc_post_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
+    hpc = hpc_config(config)
+    base_runtime = hpc_runtime_config(config)
+    runtime = deepcopy(base_runtime)
+    post_runtime = deepcopy(hpc.get("post_runtime", {}))
+    runtime.update(post_runtime)
+
+    if "setup_commands" not in post_runtime and hpc.get("post_setup_commands") is not None:
+        runtime["setup_commands"] = deepcopy(hpc.get("post_setup_commands"))
+    if "modules" not in post_runtime and hpc.get("post_modules") is not None:
+        runtime["modules"] = deepcopy(hpc.get("post_modules"))
+    if "python_env" not in post_runtime and "post_python_env" in hpc:
+        runtime["python_env"] = hpc.get("post_python_env")
+
+    python_cmd = runtime.get("python_cmd")
+    if python_cmd is None:
+        if hpc.get("post_python_cmd") is not None:
+            python_cmd = deepcopy(hpc.get("post_python_cmd"))
+        elif hpc.get("python_cmd") is not None:
+            python_cmd = deepcopy(hpc.get("python_cmd"))
+        elif config.get("python_cmd") is not None:
+            python_cmd = deepcopy(config.get("python_cmd"))
+        else:
+            python_cmd = "python3"
+    runtime["python_cmd"] = python_cmd
+    return runtime
+
+
 def resolve_named_runtime_config(config: dict[str, Any], runtime_key: str) -> dict[str, Any]:
     if runtime_key == "wps_runtime":
         return hpc_wps_runtime_config(config)
+    if runtime_key == "post_runtime":
+        return hpc_post_runtime_config(config)
     return hpc_runtime_config(config)
 
 
@@ -387,6 +417,138 @@ def stage_met_em_block(remote_project_dir: PurePosixPath | str) -> str:
             "done",
         ]
     )
+
+
+def substep_runner_block() -> str:
+    return "\n".join(
+        [
+            "run_logged_step() {",
+            '  local step_name="$1"',
+            '  local log_path="$2"',
+            '  local state_path="$3"',
+            '  local command="$4"',
+            '  printf \'step=%s\\n\' "$step_name" >> "$MAIN_LOG"',
+            '  printf \'command=%s\\n\' "$command" >> "$MAIN_LOG"',
+            '  printf \'state=%s:running\\n\' "$step_name" >> "$MAIN_LOG"',
+            '  printf \'running\\n\' > "$state_path"',
+            '  if eval "$command" > "$log_path" 2>&1; then',
+            '    printf \'state=%s:completed\\n\' "$step_name" >> "$MAIN_LOG"',
+            '    printf \'completed\\n\' > "$state_path"',
+            "  else",
+            '    local exit_code="$?"',
+            '    printf \'state=%s:failed exit_code=%s\\n\' "$step_name" "$exit_code" >> "$MAIN_LOG"',
+            '    printf \'failed\\n\' > "$state_path"',
+            '    return "$exit_code"',
+            "  fi",
+            "}",
+        ]
+    )
+
+
+def wps_substep_log_name(step_name: str) -> str:
+    return {
+        "geogrid": "wrf-wps-geogrid.log",
+        "link_grib": "wrf-wps-link-grib.log",
+        "ungrib": "wrf-wps-ungrib.log",
+        "metgrid": "wrf-wps-metgrid.log",
+    }[step_name]
+
+
+def run_substep_log_name(step_name: str) -> str:
+    return {
+        "real": "wrf-run-real.log",
+        "wrf": "wrf-run-wrf.log",
+    }[step_name]
+
+
+def wps_prepare_block(selected_substeps: list[str], remote_log_dir: PurePosixPath | str) -> str:
+    cleanup_patterns = {
+        "geogrid": ["geo_em.d*.nc", "GRIBFILE.*", "FILE:*", "PFILE:*", "GFS:*", "met_em.d*.nc"],
+        "link_grib": ["GRIBFILE.*", "FILE:*", "PFILE:*", "GFS:*", "met_em.d*.nc"],
+        "ungrib": ["FILE:*", "PFILE:*", "GFS:*", "met_em.d*.nc"],
+        "metgrid": ["met_em.d*.nc"],
+    }
+    remote_log_root = PurePosixPath(str(remote_log_dir))
+    state_files = [
+        shlex.quote(str(remote_log_root / f"{wps_substep_log_name(step_name)}.state"))
+        for step_name in ("geogrid", "link_grib", "ungrib", "metgrid")
+    ]
+    cleanup = cleanup_patterns[selected_substeps[0]]
+    lines = [f"rm -f {' '.join(state_files)}"]
+    if cleanup:
+        lines.append(f"rm -f {' '.join(cleanup)}")
+    return "\n".join(lines)
+
+
+def wps_run_block(selected_substeps: list[str], remote_log_dir: PurePosixPath | str, commands: dict[str, str]) -> str:
+    remote_log_root = PurePosixPath(str(remote_log_dir))
+    lines: list[str] = []
+    for step_name in selected_substeps:
+        log_path = remote_log_root / wps_substep_log_name(step_name)
+        state_path = PurePosixPath(str(log_path) + ".state")
+        lines.append(
+            f'run_logged_step "{step_name}" {shlex.quote(str(log_path))} '
+            f"{shlex.quote(str(state_path))} {shlex.quote(commands[step_name])}"
+        )
+    return "\n".join(lines)
+
+
+def wrf_prepare_block(selected_substeps: list[str], remote_log_dir: PurePosixPath | str) -> str:
+    remote_log_root = PurePosixPath(str(remote_log_dir))
+    state_files = [
+        shlex.quote(str(remote_log_root / f"{run_substep_log_name(step_name)}.state"))
+        for step_name in ("real", "wrf")
+    ]
+    lines = [f"rm -f {' '.join(state_files)}"]
+    if selected_substeps[0] == "real":
+        lines.append("rm -f wrfinput_d* wrfbdy_d01 wrfout_d* rsl.*")
+    else:
+        lines.append("rm -f wrfout_d* rsl.*")
+    lines.append('find "../output" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true')
+    return "\n".join(lines)
+
+
+def wrf_run_block(
+    selected_substeps: list[str],
+    remote_project_dir: PurePosixPath | str,
+    remote_log_dir: PurePosixPath | str,
+    *,
+    real_cmd: str,
+    wrf_cmd: str,
+    post_module_load_block: str,
+    post_activate_block: str,
+    post_python_cmd: str,
+    remote_post_script: str,
+    project_name: str,
+    remote_runs_dir: str,
+) -> str:
+    remote_log_root = PurePosixPath(str(remote_log_dir))
+    remote_project_root = PurePosixPath(str(remote_project_dir))
+    lines: list[str] = []
+    if "real" in selected_substeps:
+        real_log_path = remote_log_root / run_substep_log_name("real")
+        real_state_path = PurePosixPath(str(real_log_path) + ".state")
+        lines.append(
+            f'run_logged_step "real" {shlex.quote(str(real_log_path))} '
+            f"{shlex.quote(str(real_state_path))} {shlex.quote(real_cmd)}"
+        )
+    if "wrf" in selected_substeps:
+        wrf_log_path = remote_log_root / run_substep_log_name("wrf")
+        wrf_state_path = PurePosixPath(str(wrf_log_path) + ".state")
+        lines.append(
+            f'run_logged_step "wrf" {shlex.quote(str(wrf_log_path))} '
+            f"{shlex.quote(str(wrf_state_path))} {shlex.quote(wrf_cmd)}"
+        )
+        lines.append(post_module_load_block)
+        lines.append(post_activate_block)
+        lines.append(f"cd {shlex.quote(str(remote_project_root))}")
+        lines.append(
+            f"{post_python_cmd} {shlex.quote(remote_post_script)} --project-name "
+            f"{shlex.quote(project_name)} --runs-dir {shlex.quote(remote_runs_dir)}"
+        )
+        lines.append(f"cd {shlex.quote(str(remote_project_root / 'wrf'))}")
+    lines.append(f'cp -f rsl.* {shlex.quote(str(remote_log_root))}/ 2>/dev/null || true')
+    return "\n".join(lines)
 
 
 def validate_runtime_config(config: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -683,6 +845,7 @@ class HpcSchedulerAdapter(ABC):
             launcher_cmd = str(runtime.get("launcher_cmd") or "mpirun")
             tasks_flag = str(runtime.get("tasks_flag") or "-np")
             runtime_mode = runtime["mode"]
+            selected_substeps = [str(name) for name in (plan.get("selected_substeps") or ("geogrid", "link_grib", "ungrib", "metgrid"))]
             remote_wps_dir = str(runtime.get("remote_wps_dir") or ".").strip() or "."
             if runtime_mode == "project":
                 project_wps_dir = Path(project_state["paths"]["wps_dir"])
@@ -764,6 +927,12 @@ class HpcSchedulerAdapter(ABC):
                 runtime.get("metgrid_cmd") or "{metgrid_exe}",
                 runtime_context,
             ).strip()
+            substep_commands = {
+                "geogrid": geogrid_cmd,
+                "link_grib": link_grib_cmd,
+                "ungrib": ungrib_cmd,
+                "metgrid": metgrid_cmd,
+            }
             rendered = template.format(
                 project_name=project_state["project_name"],
                 partition=hpc["partition"],
@@ -777,18 +946,20 @@ class HpcSchedulerAdapter(ABC):
                 remote_work_dir=str(remote_project_dir / "wps"),
                 module_load_block=module_load_block(config, runtime_context, runtime_key="wps_runtime"),
                 activate_block=activate_block(config, runtime_key="wps_runtime"),
-                geogrid_cmd=geogrid_cmd,
-                link_grib_cmd=link_grib_cmd,
-                ungrib_cmd=ungrib_cmd,
-                metgrid_cmd=metgrid_cmd,
+                selected_substeps=",".join(selected_substeps),
+                substep_helpers_block=substep_runner_block(),
+                substep_prepare_block=wps_prepare_block(selected_substeps, remote_log_dir),
+                substep_run_block=wps_run_block(selected_substeps, remote_log_dir, substep_commands),
             )
         else:
             runtime, runtime_missing = validate_runtime_config(config)
             if runtime_missing:
                 raise RuntimeError(f"Invalid HPC runtime configuration: {', '.join(runtime_missing)}")
+            post_runtime = hpc_post_runtime_config(config)
             launcher_cmd = str(runtime.get("launcher_cmd") or "mpirun")
             tasks_flag = str(runtime.get("tasks_flag") or "-np")
             runtime_mode = runtime["mode"]
+            selected_substeps = [str(name) for name in (plan.get("selected_substeps") or ("real", "wrf"))]
             remote_run_dir = str(runtime.get("remote_run_dir") or ".").strip() or "."
             if runtime_mode == "project":
                 real_exe = "./real.exe"
@@ -820,6 +991,11 @@ class HpcSchedulerAdapter(ABC):
                 "real_exe": real_exe,
                 "wrf_exe": wrf_exe,
             }
+            post_runtime_context = {
+                **runtime_context,
+                "remote_runs_dir": str(remote_project_dir.parent),
+                "remote_post_script": str(remote_project_dir / ".wrf-skill" / "scripts" / "wrf_post.py"),
+            }
             real_cmd = render_shell_command(
                 runtime.get("real_cmd") or "{launch_cmd} {tasks_flag} {total_tasks} {real_exe}",
                 runtime_context,
@@ -828,6 +1004,10 @@ class HpcSchedulerAdapter(ABC):
                 runtime.get("wrf_cmd") or "{launch_cmd} {tasks_flag} {total_tasks} {wrf_exe}",
                 runtime_context,
             )
+            post_python_cmd = render_shell_command(
+                post_runtime.get("python_cmd") or "python3",
+                post_runtime_context,
+            ).strip()
             rendered = template.format(
                 project_name=project_state["project_name"],
                 partition=hpc["partition"],
@@ -838,11 +1018,29 @@ class HpcSchedulerAdapter(ABC):
                 walltime_hours=plan["walltime_hours"],
                 remote_project_dir=str(remote_project_dir),
                 remote_log_dir=str(remote_log_dir),
+                selected_substeps=",".join(selected_substeps),
                 module_load_block=module_load_block(config, runtime_context),
                 activate_block=activate_block(config),
                 stage_met_em_block=stage_met_em_block(remote_project_dir),
-                real_cmd=real_cmd,
-                wrf_cmd=wrf_cmd,
+                substep_helpers_block=substep_runner_block(),
+                substep_prepare_block=wrf_prepare_block(selected_substeps, remote_log_dir),
+                substep_run_block=wrf_run_block(
+                    selected_substeps,
+                    remote_project_dir,
+                    remote_log_dir,
+                    real_cmd=real_cmd,
+                    wrf_cmd=wrf_cmd,
+                    post_module_load_block=module_load_block(
+                        config,
+                        post_runtime_context,
+                        runtime_key="post_runtime",
+                    ),
+                    post_activate_block=activate_block(config, runtime_key="post_runtime"),
+                    post_python_cmd=post_python_cmd,
+                    remote_post_script=post_runtime_context["remote_post_script"],
+                    project_name=project_state["project_name"],
+                    remote_runs_dir=post_runtime_context["remote_runs_dir"],
+                ),
             )
         script_path.write_text(rendered, encoding="utf-8", newline="\n")
         return {

@@ -37,6 +37,22 @@ ALLOWED_TRANSITIONS = {
     "completed": set(),
     "failed": set(),
 }
+WORKFLOW_SUBSTEP_ORDER = {
+    "wrf-wps": ("geogrid", "link_grib", "ungrib", "metgrid"),
+    "wrf-run": ("real", "wrf"),
+}
+
+
+def _substep_template() -> dict[str, Any]:
+    return {
+        "state": "pending",
+        "log_path": None,
+        "started_at": None,
+        "finished_at": None,
+        "last_error": None,
+        "outputs": [],
+        "attempts": 0,
+    }
 
 
 def posix_path(path: Path | str) -> str:
@@ -95,6 +111,13 @@ def create_project_state(
             "last_task": None,
             "last_admission": None,
         },
+        "substeps": {
+            workflow: {
+                name: _substep_template()
+                for name in ordered_names
+            }
+            for workflow, ordered_names in WORKFLOW_SUBSTEP_ORDER.items()
+        },
         "last_error": None,
         "updated_at": utc_now(),
     }
@@ -112,10 +135,27 @@ def ensure_execution_fields(state: dict[str, Any]) -> dict[str, Any]:
     return execution
 
 
+def ensure_substep_fields(state: dict[str, Any]) -> dict[str, Any]:
+    substeps = state.setdefault("substeps", {})
+    for workflow, ordered_names in WORKFLOW_SUBSTEP_ORDER.items():
+        workflow_steps = substeps.setdefault(workflow, {})
+        for name in ordered_names:
+            record = workflow_steps.setdefault(name, _substep_template())
+            record.setdefault("state", "pending")
+            record.setdefault("log_path", None)
+            record.setdefault("started_at", None)
+            record.setdefault("finished_at", None)
+            record.setdefault("last_error", None)
+            record.setdefault("outputs", [])
+            record.setdefault("attempts", 0)
+    return substeps
+
+
 def load_project(path: Path | str) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     ensure_execution_fields(payload)
+    ensure_substep_fields(payload)
     return payload
 
 
@@ -124,6 +164,7 @@ def save_project(state: dict[str, Any], path: Path | str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     snapshot = deepcopy(state)
     ensure_execution_fields(snapshot)
+    ensure_substep_fields(snapshot)
     snapshot["updated_at"] = utc_now()
     with target.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(snapshot, handle, indent=2, sort_keys=False)
@@ -203,6 +244,100 @@ def clear_error(state: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+def workflow_substeps(state: dict[str, Any], workflow: str) -> dict[str, dict[str, Any]]:
+    ensure_substep_fields(state)
+    if workflow not in WORKFLOW_SUBSTEP_ORDER:
+        raise KeyError(f"Unknown workflow: {workflow}")
+    return state["substeps"][workflow]
+
+
+def mark_substeps_stale(
+    state: dict[str, Any],
+    workflow: str,
+    *,
+    from_substep: str | None = None,
+) -> dict[str, Any]:
+    steps = workflow_substeps(state, workflow)
+    ordered_names = WORKFLOW_SUBSTEP_ORDER[workflow]
+    start_index = 0
+    if from_substep is not None:
+        if from_substep not in steps:
+            raise KeyError(f"Unknown substep {from_substep!r} for workflow {workflow!r}")
+        start_index = ordered_names.index(from_substep)
+
+    for name in ordered_names[start_index:]:
+        record = steps[name]
+        record["state"] = "stale"
+        record["log_path"] = None
+        record["started_at"] = None
+        record["finished_at"] = None
+        record["last_error"] = None
+        record["outputs"] = []
+    state["updated_at"] = utc_now()
+    return state
+
+
+def reset_all_substeps(
+    state: dict[str, Any],
+    *,
+    state_value: str = "pending",
+) -> dict[str, Any]:
+    ensure_substep_fields(state)
+    for workflow in WORKFLOW_SUBSTEP_ORDER:
+        for record in state["substeps"][workflow].values():
+            record["state"] = state_value
+            record["log_path"] = None
+            record["started_at"] = None
+            record["finished_at"] = None
+            record["last_error"] = None
+            record["outputs"] = []
+            record["attempts"] = 0
+    state["updated_at"] = utc_now()
+    return state
+
+
+def start_substep(
+    state: dict[str, Any],
+    workflow: str,
+    substep: str,
+    *,
+    log_path: str | None = None,
+) -> dict[str, Any]:
+    record = workflow_substeps(state, workflow)[substep]
+    record["state"] = "running"
+    record["log_path"] = log_path
+    record["started_at"] = utc_now()
+    record["finished_at"] = None
+    record["last_error"] = None
+    record["outputs"] = []
+    record["attempts"] = int(record.get("attempts") or 0) + 1
+    state["updated_at"] = utc_now()
+    return state
+
+
+def finish_substep(
+    state: dict[str, Any],
+    workflow: str,
+    substep: str,
+    *,
+    substep_state: str = "completed",
+    log_path: str | None = None,
+    outputs: list[str] | None = None,
+    error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    record = workflow_substeps(state, workflow)[substep]
+    record["state"] = substep_state
+    if log_path is not None:
+        record["log_path"] = log_path
+    if record.get("started_at") is None and substep_state == "completed":
+        record["started_at"] = utc_now()
+    record["finished_at"] = utc_now()
+    record["last_error"] = deepcopy(error)
+    record["outputs"] = list(outputs or [])
+    state["updated_at"] = utc_now()
+    return state
+
+
 def has_blocking_active_task(state: dict[str, Any]) -> bool:
     execution = ensure_execution_fields(state)
     active_task = execution.get("active_task")
@@ -277,6 +412,8 @@ def clear_downstream_artifacts(state: dict[str, Any]) -> dict[str, Any]:
         artifacts[key] = []
     execution = ensure_execution_fields(state)
     execution["job_id"] = None
+    mark_substeps_stale(state, "wrf-wps")
+    mark_substeps_stale(state, "wrf-run")
     state["updated_at"] = utc_now()
     return state
 

@@ -47,10 +47,10 @@ git clone https://github.com/origin652/wrf-skill.git
 cd wrf-skill
 
 # 2. Install core dependencies
-pip install -e .
+python3 -m pip install -e .
 
 # 3. (Optional) For development or running tests
-pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"
 
 # 4. Verify installation
 python3 scripts/wrf.py --version
@@ -247,7 +247,25 @@ python3 scripts/wrf.py status --project-name my_case
 python3 scripts/wrf.py logs --project-name my_case
 
 # For HPC jobs, collect outputs
+# By default this syncs logs, plots, sidecar JSON, and other lightweight artifacts only.
+# It does not pull wrfout_d* back to the local machine.
 python3 scripts/wrf.py collect --project-name my_case
+
+# ========== 6.5. Step-Level WPS / WRF Control (local and HPC) ==========
+# Run only one WPS substep
+python3 scripts/wrf.py wps --project-name my_case --only geogrid
+
+# Resume WPS from a substep
+python3 scripts/wrf.py wps --project-name my_case --from ungrib
+
+# Run only real.exe
+python3 scripts/wrf.py run --project-name my_case --only real
+
+# Resume from wrf.exe
+python3 scripts/wrf.py run --project-name my_case --from wrf
+
+# Read one substep log directly
+python3 scripts/wrf.py logs --project-name my_case --substep real
 
 # ========== 7. Post-processing and Visualization ==========
 # Generate post-processing configuration
@@ -256,7 +274,9 @@ python3 scripts/post_spec.py --project-name my_case --output post_spec.json
 # Or use complete example
 cp templates/post_spec.example.json post_spec.json
 
-# Run post-processing
+# Run post-processing locally
+# Note: in HPC mode, wrf-run already performs post-processing remotely by default.
+# Run this manually only if you intentionally kept wrfout files locally.
 python3 scripts/wrf.py post --project-name my_case --post-spec post_spec.json
 
 # Or render individual figures
@@ -481,6 +501,21 @@ Edit key fields:
 }
 ```
 
+The default HPC `wrf-run` behavior is now:
+
+- run `real.exe` and `wrf.exe` remotely, then invoke `wrf_post.py` on the remote side
+- keep `collect` lightweight by default for `wrf-run`, syncing logs, plots, sidecar JSON, and other small diagnostics instead of `wrfout_d*`
+- allow a dedicated remote post-processing environment through `hpc.post_runtime` when the plotting stack differs from the WRF runtime
+
+`--only` / `--from` now work for HPC submission as well.
+
+- `python3 scripts/wrf.py wps --project-name my_case --only geogrid --config config/wrf_env.json` runs only `geogrid` on the remote side
+- `python3 scripts/wrf.py run --project-name my_case --from wrf --config config/wrf_env.json` resumes remotely from `wrf.exe` and still performs remote post-processing
+- `python3 scripts/wrf.py logs --project-name my_case --substep wrf` can read the synced substep log after `collect`
+- When you skip earlier steps on HPC, the local project must already contain the prerequisite artifacts so `sync_hpc.sh` can push them upstream
+  Example: `wps --from ungrib` requires local `GRIBFILE.*`
+  Example: `run --from wrf` requires local `wrfinput_d*` and `wrfbdy_d01`
+
 ---
 
 ## Using with Codex
@@ -561,16 +596,16 @@ A: Pull requests are welcome! Please read the contribution guidelines first.
 
 ```bash
 # Install development dependencies
-pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"
 
 # Run tests
-pytest tests/
+python3 -m pytest tests/
 
 # Code linting
-ruff check scripts/
+python3 -m ruff check scripts/
 
 # Type checking
-mypy scripts/
+python3 -m mypy scripts/
 ```
 
 ---

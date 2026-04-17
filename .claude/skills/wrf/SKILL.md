@@ -25,9 +25,10 @@ Use this skill when the user asks for an end-to-end WRF workflow from a natural-
    - `wps`
    - `run`
 9. For long-running work, return immediately after `start` unless the user explicitly wants blocking wait.
-10. For follow-up questions such as "现在到哪了", use `scripts/wrf.py status` and `scripts/wrf.py logs`.
-11. If an HPC run is terminal and remote outputs still need to be registered locally, use `scripts/wrf.py collect`.
-12. The legacy direct entries `scripts/wrf_init.py`, `scripts/wrf_config.py`, `scripts/wrf_task.py`, and `scripts/wrf_post.py` remain supported for compatibility, but new examples should prefer `scripts/wrf.py`.
+10. For follow-up questions such as "现在到哪了", use `scripts/wrf.py status`, `scripts/wrf.py logs`, and `scripts/wrf.py logs --substep <name>` when the user wants one WPS / WRF substep log directly.
+11. Substep-level `--only` / `--from` control is available for both local and HPC `wps` / `run` commands.
+12. If an HPC run is terminal and remote outputs still need to be registered locally, use `scripts/wrf.py collect`.
+13. The legacy direct entries `scripts/wrf_init.py`, `scripts/wrf_config.py`, `scripts/wrf_task.py`, and `scripts/wrf_post.py` remain supported for compatibility, but new examples should prefer `scripts/wrf.py`.
 
 ## Local Runtime Notes
 
@@ -103,6 +104,15 @@ python3 scripts/wrf.py logs --project-name demo --lines 80
 python3 scripts/wrf.py collect --project-name demo --config config/wrf_env.json
 ```
 
+Substep control works in both local and HPC modes:
+```bash
+python3 scripts/wrf.py wps --project-name demo --only geogrid
+python3 scripts/wrf.py wps --project-name demo --from ungrib --config config/wrf_env.json
+python3 scripts/wrf.py run --project-name demo --only real
+python3 scripts/wrf.py run --project-name demo --from wrf --config config/wrf_env.json
+python3 scripts/wrf.py logs --project-name demo --substep wrf
+```
+
 ## Rules
 
 - Do not wait in the same AI turn for high-resolution or long-forecast WRF work unless the user explicitly asks to block.
@@ -112,6 +122,7 @@ python3 scripts/wrf.py collect --project-name demo --config config/wrf_env.json
 - Treat `project.json.execution.active_task` as the source of truth for current progress.
 - If `active_task.state` is `queued` or `running`, do not issue destructive config changes; report the conflict first.
 - On HPC requests, do not bypass admission by directly calling scheduler commands.
+- If the user skips earlier WPS / WRF substeps on HPC, make sure the prerequisite artifacts already exist locally so `sync_hpc.sh` can push them to the remote project.
 - For local runtime customization, stay inside `custom_safe`; do not describe or generate arbitrary local shell command chains.
 
 ## Files

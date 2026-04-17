@@ -75,6 +75,52 @@ class WrfCliTests(unittest.TestCase):
             ],
         )
 
+    def test_run_forwards_substep_selection_flags(self) -> None:
+        with patch(
+            "scripts.wrf.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0),
+        ) as mocked_run:
+            exit_code = wrf.main(["run", "--project-name", "demo", "--only", "real"])
+
+        self.assertEqual(exit_code, 0)
+        forwarded = mocked_run.call_args.args[0]
+        self.assertEqual(
+            forwarded,
+            [
+                sys.executable,
+                str(Path(wrf.__file__).resolve().parent / "wrf_task.py"),
+                "start",
+                "--step",
+                "wrf-run",
+                "--project-name",
+                "demo",
+                "--only",
+                "real",
+            ],
+        )
+
+    def test_logs_forwards_substep_flag(self) -> None:
+        with patch(
+            "scripts.wrf.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0),
+        ) as mocked_run:
+            exit_code = wrf.main(["logs", "--project-name", "demo", "--substep", "real"])
+
+        self.assertEqual(exit_code, 0)
+        forwarded = mocked_run.call_args.args[0]
+        self.assertEqual(
+            forwarded,
+            [
+                sys.executable,
+                str(Path(wrf.__file__).resolve().parent / "wrf_task.py"),
+                "logs",
+                "--project-name",
+                "demo",
+                "--substep",
+                "real",
+            ],
+        )
+
     def test_top_level_help_lists_preferred_entry(self) -> None:
         buffer = io.StringIO()
         with redirect_stdout(buffer):
@@ -82,7 +128,7 @@ class WrfCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         help_text = buffer.getvalue()
-        self.assertIn("Unified WRF workflow entry point.", help_text)
+        self.assertIn(f"Unified WRF workflow entry point (v{wrf.__version__})", help_text)
         self.assertIn("python3 scripts/wrf.py <command> [args...]", help_text)
         self.assertIn("Existing scripts/wrf_init.py", help_text)
 

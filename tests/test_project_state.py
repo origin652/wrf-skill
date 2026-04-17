@@ -5,10 +5,13 @@ from pathlib import Path
 
 from scripts.project_state import (
     create_project_state,
+    finish_substep,
     load_project,
+    mark_substeps_stale,
     record_error,
     register_artifact,
     seed_project,
+    start_substep,
     transition,
 )
 
@@ -28,6 +31,8 @@ class ProjectStateTests(unittest.TestCase):
         self.assertEqual(state["project_name"], "demo")
         self.assertEqual(state["paths"]["wps_dir"], "runs/demo/wps")
         self.assertEqual(state["status"], "created")
+        self.assertEqual(state["substeps"]["wrf-wps"]["geogrid"]["state"], "pending")
+        self.assertEqual(state["substeps"]["wrf-run"]["wrf"]["state"], "pending")
 
     def test_transition_rejects_invalid_state_changes(self) -> None:
         state = create_project_state("demo", Path("runs") / "demo")
@@ -45,6 +50,30 @@ class ProjectStateTests(unittest.TestCase):
         record_error(state, "wrf-run", "MPI_FAIL", "mpi failed", "runs/demo/logs/wrf-run.log")
         self.assertEqual(state["status"], "failed")
         self.assertEqual(state["last_error"]["code"], "MPI_FAIL")
+
+    def test_substep_helpers_track_lifecycle(self) -> None:
+        state = create_project_state("demo", Path("runs") / "demo")
+
+        mark_substeps_stale(state, "wrf-wps", from_substep="ungrib")
+        self.assertEqual(state["substeps"]["wrf-wps"]["ungrib"]["state"], "stale")
+        self.assertEqual(state["substeps"]["wrf-wps"]["metgrid"]["state"], "stale")
+
+        start_substep(state, "wrf-run", "real", log_path="runs/demo/logs/wrf-run-real.log")
+        self.assertEqual(state["substeps"]["wrf-run"]["real"]["state"], "running")
+        self.assertEqual(state["substeps"]["wrf-run"]["real"]["attempts"], 1)
+
+        finish_substep(
+            state,
+            "wrf-run",
+            "real",
+            log_path="runs/demo/logs/wrf-run-real.log",
+            outputs=["runs/demo/wrf/wrfinput_d01"],
+        )
+        self.assertEqual(state["substeps"]["wrf-run"]["real"]["state"], "completed")
+        self.assertEqual(
+            state["substeps"]["wrf-run"]["real"]["outputs"],
+            ["runs/demo/wrf/wrfinput_d01"],
+        )
 
     def test_seed_project_writes_files(self) -> None:
         tmp_dir = make_test_dir("_test_project_state")

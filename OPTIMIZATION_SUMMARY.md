@@ -79,24 +79,24 @@
 ### 安装依赖
 ```bash
 # 安装核心依赖
-pip install -e .
+python3 -m pip install -e .
 
 # 安装开发工具
-pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"
 ```
 
 ### 运行测试
 ```bash
-pytest tests/
+python3 -m pytest tests/
 ```
 
 ### 代码质量检查
 ```bash
 # 使用 ruff 检查代码
-ruff check scripts/
+python3 -m ruff check scripts/
 
 # 使用 mypy 类型检查
-mypy scripts/
+python3 -m mypy scripts/
 ```
 
 ### 清理临时文件
@@ -131,13 +131,13 @@ python3 scripts/wrf.py --version
 
 1. **运行测试套件**
    ```bash
-   pip install -e ".[dev]"
-   pytest tests/ -v
+   python3 -m pip install -e ".[dev]"
+   python3 -m pytest tests/ -v
    ```
 
 2. **代码格式化**
    ```bash
-   ruff format scripts/
+   python3 -m ruff format scripts/
    ```
 
 3. **提交更改**

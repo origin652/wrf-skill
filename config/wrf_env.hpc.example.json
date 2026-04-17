@@ -47,6 +47,15 @@
       "python_env": null,
       "remote_wps_dir": "$WPS_HOME"
     },
+    "post_runtime": {
+      "setup_commands": [
+        "source /etc/profile",
+        "module purge"
+      ],
+      "modules": [],
+      "python_env": "wrf-post",
+      "python_cmd": "python3"
+    },
     "limits": {
       "max_nodes": 4,
       "max_total_tasks": 128,

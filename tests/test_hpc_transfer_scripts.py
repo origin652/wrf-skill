@@ -35,19 +35,22 @@ class HpcTransferScriptTests(unittest.TestCase):
         )
 
         self.assertTrue((target_dir / "config" / "namelist.input").exists())
+        self.assertTrue((target_dir / ".wrf-skill" / "scripts" / "wrf_post.py").exists())
         self.assertFalse((target_dir / "data").exists())
         self.assertFalse((target_dir / "output").exists())
 
-    def test_collect_hpc_local_mode_copies_expected_outputs(self) -> None:
+    def test_collect_hpc_local_mode_defaults_to_lightweight_wrf_outputs(self) -> None:
         root = make_test_dir("_test_collect_hpc_local_mode")
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         remote_dir = root / "remote_project"
         local_dir = root / "local_project"
         (remote_dir / "logs").mkdir(parents=True, exist_ok=True)
-        (remote_dir / "output").mkdir(parents=True, exist_ok=True)
+        (remote_dir / "output" / "plots").mkdir(parents=True, exist_ok=True)
         (remote_dir / "wrf").mkdir(parents=True, exist_ok=True)
         (remote_dir / "logs" / "rsl.out.0000").write_text("log\n", encoding="utf-8")
         (remote_dir / "output" / "wrfout_d01_2024-07-20_00:00:00").write_text("out\n", encoding="utf-8")
+        (remote_dir / "output" / "plots" / "surface.png").write_text("png\n", encoding="utf-8")
+        (remote_dir / "output" / "plots" / "surface.json").write_text("{\"ok\":true}\n", encoding="utf-8")
         (remote_dir / "wrf" / "wrfinput_d01").write_text("input\n", encoding="utf-8")
         (remote_dir / "wrf" / "wrfbdy_d01").write_text("bdy\n", encoding="utf-8")
         (remote_dir / "wrf" / "namelist.output").write_text("namelist\n", encoding="utf-8")
@@ -61,11 +64,43 @@ class HpcTransferScriptTests(unittest.TestCase):
         )
 
         self.assertTrue((local_dir / "logs" / "rsl.out.0000").exists())
-        self.assertTrue((local_dir / "output" / "wrfout_d01_2024-07-20_00:00:00").exists())
+        self.assertTrue((local_dir / "output" / "plots" / "surface.png").exists())
+        self.assertTrue((local_dir / "output" / "plots" / "surface.json").exists())
+        self.assertFalse((local_dir / "output" / "wrfout_d01_2024-07-20_00:00:00").exists())
         self.assertTrue((local_dir / "wrf" / "wrfinput_d01").exists())
         self.assertTrue((local_dir / "wrf" / "wrfbdy_d01").exists())
         self.assertTrue((local_dir / "wrf" / "namelist.output").exists())
         self.assertFalse((local_dir / "wrf" / "ignore.me").exists())
+
+    def test_collect_hpc_local_mode_wps_scope_keeps_wps_outputs(self) -> None:
+        root = make_test_dir("_test_collect_hpc_local_mode_wps")
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        remote_dir = root / "remote_project"
+        local_dir = root / "local_project"
+        (remote_dir / "logs").mkdir(parents=True, exist_ok=True)
+        (remote_dir / "wps").mkdir(parents=True, exist_ok=True)
+        (remote_dir / "logs" / "wrf-wps.log").write_text("log\n", encoding="utf-8")
+        (remote_dir / "wps" / "met_em.d01.2024-07-20_00:00:00.nc").write_text("met\n", encoding="utf-8")
+        (remote_dir / "wps" / "namelist.wps").write_text("wps\n", encoding="utf-8")
+
+        subprocess.run(
+            [
+                "bash",
+                str(SCRIPTS_DIR / "collect_hpc.sh"),
+                "login",
+                "-",
+                str(remote_dir),
+                str(local_dir),
+                "wrf-wps",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertTrue((local_dir / "logs" / "wrf-wps.log").exists())
+        self.assertTrue((local_dir / "wps" / "met_em.d01.2024-07-20_00:00:00.nc").exists())
+        self.assertTrue((local_dir / "wps" / "namelist.wps").exists())
 
 
 if __name__ == "__main__":

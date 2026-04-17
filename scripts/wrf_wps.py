@@ -23,11 +23,14 @@ try:
     from namelist_parser import read_namelist
     from project_state import (
         clear_error,
+        finish_substep,
         load_project,
+        mark_substeps_stale,
         posix_path,
         record_error,
         register_artifact,
         save_project,
+        start_substep,
         transition,
     )
     from spec_utils import normalize_spec
@@ -45,11 +48,14 @@ except ImportError:  # pragma: no cover
     from .namelist_parser import read_namelist
     from .project_state import (
         clear_error,
+        finish_substep,
         load_project,
+        mark_substeps_stale,
         posix_path,
         record_error,
         register_artifact,
         save_project,
+        start_substep,
         transition,
     )
     from .spec_utils import normalize_spec
@@ -72,6 +78,8 @@ SUPPORT_TARGETS = {
     "METGRID.TBL": Path("metgrid") / "METGRID.TBL",
     "Vtable": Path("Vtable"),
 }
+WPS_SUBSTEPS = ("geogrid", "link_grib", "ungrib", "metgrid")
+UNGRIB_OUTPUT_PATTERNS = ("FILE:*", "PFILE:*", "GFS:*")
 
 
 def load_json(path: Path | str) -> dict[str, Any]:
@@ -279,6 +287,103 @@ def build_step_logs(log_dir: Path) -> dict[str, Path]:
     }
 
 
+def resolve_selected_substeps(
+    *,
+    only_step: str | None,
+    from_step: str | None,
+) -> list[str]:
+    if only_step and from_step:
+        raise ValueError("--only and --from cannot be used together")
+    if only_step:
+        if only_step not in WPS_SUBSTEPS:
+            raise ValueError(f"Unsupported WPS substep: {only_step}")
+        return [only_step]
+    if from_step:
+        if from_step not in WPS_SUBSTEPS:
+            raise ValueError(f"Unsupported WPS substep: {from_step}")
+        return list(WPS_SUBSTEPS[WPS_SUBSTEPS.index(from_step):])
+    return list(WPS_SUBSTEPS)
+
+
+def collect_step_output_paths(
+    work_dir: Path,
+    step_name: str,
+    *,
+    expected_met_em_files: list[Path],
+) -> list[Path]:
+    if step_name == "geogrid":
+        return sorted(path for path in work_dir.glob("geo_em.d*.nc") if path.is_file())
+    if step_name == "link_grib":
+        return sorted(path for path in work_dir.glob("GRIBFILE.*") if path.is_file())
+    if step_name == "ungrib":
+        output_paths: list[Path] = []
+        for pattern in UNGRIB_OUTPUT_PATTERNS:
+            for path in sorted(work_dir.glob(pattern)):
+                if path.is_file() and path not in output_paths:
+                    output_paths.append(path)
+        return output_paths
+    if step_name == "metgrid":
+        return [path for path in expected_met_em_files if path.exists() and path.is_file()]
+    raise ValueError(f"Unsupported WPS substep: {step_name}")
+
+
+def remove_paths(paths: list[Path]) -> list[str]:
+    removed: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = posix_path(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.exists() and path.is_file():
+            path.unlink()
+            removed.append(key)
+    return removed
+
+
+def invalidate_wps_outputs(
+    work_dir: Path,
+    start_step: str,
+    *,
+    expected_met_em_files: list[Path],
+) -> list[str]:
+    start_index = WPS_SUBSTEPS.index(start_step)
+    paths_to_remove: list[Path] = []
+    for step_name in WPS_SUBSTEPS[start_index:]:
+        paths_to_remove.extend(
+            collect_step_output_paths(
+                work_dir,
+                step_name,
+                expected_met_em_files=expected_met_em_files,
+            )
+        )
+    return remove_paths(paths_to_remove)
+
+
+def validate_existing_wps_prerequisites(
+    selected_substeps: list[str],
+    *,
+    work_dir: Path,
+    expected_met_em_files: list[Path],
+) -> tuple[bool, str | None]:
+    if not selected_substeps:
+        return False, "No WPS substeps were selected"
+
+    selected_set = set(selected_substeps)
+    first_step = selected_substeps[0]
+    if first_step == "ungrib" and "link_grib" not in selected_set:
+        if not collect_step_output_paths(work_dir, "link_grib", expected_met_em_files=expected_met_em_files):
+            return False, "ungrib requires existing GRIBFILE.* files when link_grib is not selected"
+    if first_step == "metgrid":
+        if "geogrid" not in selected_set:
+            if not collect_step_output_paths(work_dir, "geogrid", expected_met_em_files=expected_met_em_files):
+                return False, "metgrid requires existing geo_em.d*.nc files when geogrid is not selected"
+        if "ungrib" not in selected_set:
+            if not collect_step_output_paths(work_dir, "ungrib", expected_met_em_files=expected_met_em_files):
+                return False, "metgrid requires existing ungrib intermediate files when ungrib is not selected"
+    return True, None
+
+
 def build_plan(
     project_root: Path,
     wps_root: Path,
@@ -291,6 +396,7 @@ def build_plan(
     commands: dict[str, list[str]],
     *,
     runtime_mode: str,
+    selected_substeps: list[str],
 ) -> dict[str, Any]:
     return {
         "project_root": posix_path(project_root),
@@ -308,6 +414,7 @@ def build_plan(
         "missing_met_em_files": output_inventory["missing_files"],
         "runtime_mode": runtime_mode,
         "commands": commands,
+        "selected_substeps": selected_substeps,
     }
 
 
@@ -500,6 +607,8 @@ def prepare_wps(
     *,
     runs_dir: Path | str = "runs",
     config_path: Path | str = "config/wrf_env.json",
+    only_step: str | None = None,
+    from_step: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     runs_dir = Path(runs_dir)
@@ -516,6 +625,8 @@ def prepare_wps(
     spec = load_json(spec_path)
     config = load_json(config_path)
     runtime_mode_hint = local_wps_runtime_config(config)["mode"]
+    selected_substeps = resolve_selected_substeps(only_step=only_step, from_step=from_step)
+    force_execution = only_step is not None or from_step is not None
 
     work_dir = Path(base_state["paths"]["wps_dir"])
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -550,12 +661,13 @@ def prepare_wps(
         f"existing_met_em_count={output_inventory['existing_count']}",
         f"missing_met_em_count={output_inventory['missing_count']}",
         f"runtime_mode={runtime_mode_hint}",
+        f"selected_substeps={','.join(selected_substeps)}",
     ]
 
     commands: dict[str, list[str]] = {}
     env_overrides: dict[str, str] = {}
     prepend_path: list[str] = []
-    should_resolve_runtime = dry_run or not output_inventory["complete"]
+    should_resolve_runtime = dry_run or force_execution or not output_inventory["complete"]
     if should_resolve_runtime:
         try:
             runtime_mode, commands, env_overrides, prepend_path = resolve_wps_commands(
@@ -591,6 +703,7 @@ def prepare_wps(
         output_inventory,
         commands,
         runtime_mode=runtime_mode,
+        selected_substeps=selected_substeps,
     )
 
     preview_state = deepcopy(base_state)
@@ -603,7 +716,7 @@ def prepare_wps(
             "plan": plan,
         }
 
-    if output_inventory["complete"]:
+    if output_inventory["complete"] and not force_execution:
         state = deepcopy(base_state)
         update_project_for_wps(state, output_inventory, dry_run=False)
         save_project(state, project_json_path)
@@ -665,7 +778,42 @@ def prepare_wps(
         ]
     )
 
-    for step_name, command in commands.items():
+    prereqs_ok, prereq_message = validate_existing_wps_prerequisites(
+        selected_substeps,
+        work_dir=work_dir,
+        expected_met_em_files=expected_outputs,
+    )
+    if not prereqs_ok:
+        _failure(
+            base_state,
+            project_json_path,
+            main_log_path,
+            code="WPS_PREREQUISITE_MISSING",
+            message=str(prereq_message),
+            log_path=main_log_path,
+            main_log_lines=main_log_lines,
+        )
+
+    state = deepcopy(base_state)
+    mark_substeps_stale(state, "wrf-wps", from_substep=selected_substeps[0])
+    removed_outputs = invalidate_wps_outputs(
+        work_dir,
+        selected_substeps[0],
+        expected_met_em_files=expected_outputs,
+    )
+    if removed_outputs:
+        main_log_lines.append(f"invalidated_outputs={json.dumps(removed_outputs, ensure_ascii=True)}")
+    save_project(state, project_json_path)
+
+    for step_name in selected_substeps:
+        command = commands[step_name]
+        start_substep(
+            state,
+            "wrf-wps",
+            step_name,
+            log_path=posix_path(step_logs[step_name]),
+        )
+        save_project(state, project_json_path)
         completed = subprocess.run(
             command,
             cwd=work_dir,
@@ -681,12 +829,24 @@ def prepare_wps(
         output = combine_output(completed)
         write_step_log(step_logs[step_name], command, work_dir, completed.returncode, output)
         if completed.returncode != 0 or wps_output_has_error(output):
+            finish_substep(
+                state,
+                "wrf-wps",
+                step_name,
+                substep_state="failed",
+                log_path=posix_path(step_logs[step_name]),
+                error={
+                    "code": STEP_CODE_MAP[step_name],
+                    "message": output or f"{step_name} failed",
+                },
+            )
+            save_project(state, project_json_path)
             if completed.returncode != 0:
                 message = f"{step_name} failed with exit code {completed.returncode}"
             else:
                 message = f"{step_name} reported an error; see {posix_path(step_logs[step_name])}"
             _failure(
-                base_state,
+                state,
                 project_json_path,
                 main_log_path,
                 code=STEP_CODE_MAP[step_name],
@@ -694,9 +854,24 @@ def prepare_wps(
                 log_path=step_logs[step_name],
                 main_log_lines=main_log_lines,
             )
+        finish_substep(
+            state,
+            "wrf-wps",
+            step_name,
+            substep_state="completed",
+            log_path=posix_path(step_logs[step_name]),
+            outputs=[
+                posix_path(path)
+                for path in collect_step_output_paths(
+                    work_dir,
+                    step_name,
+                    expected_met_em_files=expected_outputs,
+                )
+            ],
+        )
+        save_project(state, project_json_path)
 
     output_inventory = build_output_inventory(expected_outputs)
-    state = deepcopy(base_state)
     update_project_for_wps(state, output_inventory, dry_run=False)
     save_project(state, project_json_path)
 
@@ -709,7 +884,7 @@ def prepare_wps(
     )
     write_log(main_log_path, main_log_lines)
 
-    if not output_inventory["complete"]:
+    if not output_inventory["complete"] and "metgrid" in selected_substeps:
         record_error(
             state,
             "wrf-wps",
@@ -733,6 +908,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--runs-dir", default="runs")
     parser.add_argument("--config", default="config/wrf_env.json")
+    parser.add_argument("--only", choices=WPS_SUBSTEPS)
+    parser.add_argument("--from-step", "--from", dest="from_step", choices=WPS_SUBSTEPS)
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -743,6 +920,8 @@ def main() -> int:
         args.project_name,
         runs_dir=args.runs_dir,
         config_path=args.config,
+        only_step=args.only,
+        from_step=args.from_step,
         dry_run=args.dry_run,
     )
     print(json.dumps(payload, indent=2))

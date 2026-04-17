@@ -4,6 +4,7 @@ __pycache__/
 .mypy_cache/
 .venv/
 env/
+*.egg-info/
 runs/*
 !runs/.gitkeep
 

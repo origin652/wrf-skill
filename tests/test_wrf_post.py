@@ -2962,6 +2962,79 @@ class WrfPostProjectTests(unittest.TestCase):
         self.assertIsNone(recovered_state["last_error"])
         self.assertEqual(len(recovered_state["artifacts"]["plots"]), 2)
 
+    def test_run_postprocess_refreshes_project_paths_and_discovers_local_wrfout(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_post_remote_portable_paths")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        project_root = runs_dir / "demo"
+        wrfout_path = project_root / "wrf" / "wrfout_d01_2024-07-20_00:00:00"
+        write_wrfout_netcdf(
+            wrfout_path,
+            times=["2024-07-20_00:00:00"],
+            t2=[np.array([[300.0, 301.0], [302.0, 303.0]])],
+            u10=[np.array([[1.0, 2.0], [3.0, 4.0]])],
+            v10=[np.array([[2.0, 3.0], [4.0, 5.0]])],
+            rainc=[np.zeros((2, 2))],
+            rainnc=[np.zeros((2, 2))],
+            hgt=np.array([[100.0, 150.0], [200.0, 250.0]]),
+        )
+
+        state = create_project_state("demo", project_root)
+        state["status"] = "completed"
+        state["paths"]["project_root"] = "/tmp/stale/project"
+        state["paths"]["wrf_dir"] = "/tmp/stale/project/wrf"
+        state["paths"]["output_dir"] = "/tmp/stale/project/output"
+        state["paths"]["log_dir"] = "/tmp/stale/project/logs"
+        state["artifacts"]["wrfout_files"] = ["/tmp/stale/project/wrf/wrfout_d01_2024-07-20_00:00:00"]
+        (project_root / "output").mkdir(parents=True, exist_ok=True)
+        (project_root / "logs").mkdir(parents=True, exist_ok=True)
+        save_project(state, project_root / "project.json")
+
+        post_spec_path = project_root / "post_spec.json"
+        post_spec_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "project_name": "demo",
+                    "style_defs": build_style_defs(),
+                    "layer_defs": build_layer_defs(),
+                    "figures": [
+                        {
+                            "figure_id": "surface_temperature",
+                            "selectors": {"time_indices": [0]},
+                            "render": {"title": "Surface Temperature", "dpi": 120},
+                            "output": {
+                                "subdir": "plots",
+                                "file_stem": "surface-temperature",
+                                "sidecar_json": True,
+                                "overwrite": True,
+                            },
+                            "layers": [
+                                {
+                                    "layer_id": "t2_c",
+                                    "style_id": "temperature_raster",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        payload = run_postprocess("demo", runs_dir=runs_dir, post_spec_path=post_spec_path)
+
+        artifact = payload["artifacts"][0]
+        refreshed_state = load_json(project_root / "project.json")
+        self.assertTrue(Path(artifact["path"]).exists())
+        self.assertEqual(refreshed_state["paths"]["project_root"], project_root.as_posix())
+        self.assertEqual(refreshed_state["paths"]["wrf_dir"], (project_root / "wrf").as_posix())
+        self.assertEqual(refreshed_state["paths"]["output_dir"], (project_root / "output").as_posix())
+        self.assertEqual(refreshed_state["paths"]["log_dir"], (project_root / "logs").as_posix())
+        self.assertEqual(refreshed_state["artifacts"]["plots"], [artifact["path"]])
+
     def test_run_postprocess_registers_current_figure_artifacts(self) -> None:
         runs_dir = make_test_dir("_test_wrf_post_v2_project")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))

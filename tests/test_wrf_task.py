@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from scripts.download_gfs import build_manifest
-from scripts.project_state import load_project
+from scripts.project_state import load_project, save_project
 from scripts.wrf_config import configure_project
 from scripts.wrf_data import prepare_data
 from scripts.wrf_init import initialize_project
@@ -294,6 +294,24 @@ class WrfTaskTests(unittest.TestCase):
         self.assertEqual(payload["text"], "line 2\nline 3")
         self.assertTrue(payload["log_path"].endswith("/wrf/rsl.out.0000"))
 
+    def test_logs_task_can_read_substep_log_without_task(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_task_substep_logs")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        project_json = runs_dir / "demo" / "project.json"
+        state = load_project(project_json)
+        real_log = runs_dir / "demo" / "logs" / "wrf-run-real.log"
+        real_log.write_text("line 1\nline 2\n", encoding="utf-8")
+        state["substeps"]["wrf-run"]["real"]["log_path"] = real_log.as_posix()
+        state["substeps"]["wrf-run"]["real"]["state"] = "completed"
+        save_project(state, project_json)
+
+        payload = logs_task("demo", runs_dir=runs_dir, substep="real", lines=1)
+
+        self.assertEqual(payload["text"], "line 2")
+        self.assertEqual(payload["log_path"], real_log.as_posix())
+
     def test_hpc_start_records_admission_then_submits(self) -> None:
         runs_dir = make_test_dir("_test_wrf_task_hpc_start")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
@@ -301,8 +319,13 @@ class WrfTaskTests(unittest.TestCase):
 
         project_json = runs_dir / "demo" / "project.json"
         state = load_project(project_json)
+        met_em_path = runs_dir / "demo" / "wps" / "met_em.d01.2024-07-20_00:00:00.nc"
+        met_em_path.parent.mkdir(parents=True, exist_ok=True)
+        met_em_path.write_text("met\n", encoding="utf-8")
+        state["status"] = "wps_ready"
+        state["artifacts"]["met_em_files"] = [met_em_path.as_posix()]
         state["execution"]["mode"] = "hpc"
-        project_json.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        save_project(state, project_json)
 
         admission = {
             "decision": "admissible_with_queue",
@@ -337,6 +360,62 @@ class WrfTaskTests(unittest.TestCase):
         self.assertEqual(payload["task"]["state"], "queued")
         self.assertEqual(payload["task"]["job_id"], "12345")
         self.assertEqual(state["execution"]["last_admission"]["decision"], "admissible_with_queue")
+
+    def test_hpc_start_accepts_run_substep_execution(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_task_hpc_substep_start")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        project_json = runs_dir / "demo" / "project.json"
+        state = load_project(project_json)
+        met_em_path = runs_dir / "demo" / "wps" / "met_em.d01.2024-07-20_00:00:00.nc"
+        met_em_path.parent.mkdir(parents=True, exist_ok=True)
+        met_em_path.write_text("met\n", encoding="utf-8")
+        state["status"] = "wps_ready"
+        state["artifacts"]["met_em_files"] = [met_em_path.as_posix()]
+        state["execution"]["mode"] = "hpc"
+        save_project(state, project_json)
+
+        admission = {
+            "decision": "admissible_now",
+            "reason_codes": [],
+            "requested_layout": {"nodes": 1, "tasks_per_node": 4, "total_tasks": 4, "walltime_hours": 1},
+            "recommended_layout": {"nodes": 1, "tasks_per_node": 4, "total_tasks": 4, "walltime_hours": 1},
+            "static_limits": {},
+            "live_cluster": {},
+            "alternatives": [],
+        }
+        dummy_adapter = Mock()
+        dummy_adapter.backend_name = "slurm"
+        dummy_adapter.render_job.return_value = {
+            "backend": "slurm",
+            "script_path": (runs_dir / "demo" / "hpc" / "demo.slurm.job.sh").as_posix(),
+            "remote_project_dir": "/scratch/user/wrf_runs/demo",
+            "remote_log_dir": "/scratch/user/wrf_runs/demo/logs",
+            "plan": {"selected_substeps": ["real"], **admission["recommended_layout"]},
+        }
+        dummy_adapter.submit.return_value = {"job_id": "12346", "submit_output": "Submitted batch job 12346", "state": "queued"}
+
+        with patch("scripts.wrf_task.evaluate_admission", return_value=admission), patch(
+            "scripts.wrf_task.get_scheduler_adapter", return_value=dummy_adapter
+        ), patch(
+            "scripts.wrf_task.run_sync_hpc",
+            return_value=subprocess.CompletedProcess(["sync_hpc.sh"], 0, "ok", ""),
+        ):
+            payload = start_task("demo", "wrf-run", runs_dir=runs_dir, task_kwargs={"only_step": "real"})
+
+        self.assertTrue(payload["accepted"])
+        self.assertEqual(payload["task"]["job_id"], "12346")
+        rendered_plan = dummy_adapter.render_job.call_args.args[1]
+        self.assertEqual(rendered_plan["selected_substeps"], ["real"])
+
+    def test_start_rejects_invalid_substep_for_workflow(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_task_invalid_substep")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        with self.assertRaises(ValueError):
+            start_task("demo", "wrf-wps", runs_dir=runs_dir, task_kwargs={"only_step": "real"})
 
     def test_hpc_wps_start_records_admission_then_submits(self) -> None:
         runs_dir = make_test_dir("_test_wrf_task_hpc_wps_start")
@@ -508,13 +587,78 @@ class WrfTaskTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with patch("scripts.wrf_task.subprocess.run", return_value=subprocess.CompletedProcess(["collect_hpc.sh"], 0, "ok", "")):
+        with patch(
+            "scripts.wrf_task.subprocess.run",
+            return_value=subprocess.CompletedProcess(["collect_hpc.sh"], 0, "ok", ""),
+        ) as mock_run:
             payload = collect_task("demo", task_id="task-collect-wps", runs_dir=runs_dir)
 
         state = load_project(project_json)
         self.assertEqual(payload["task"]["state"], "completed")
         self.assertEqual(state["status"], "wps_ready")
         self.assertEqual(state["artifacts"]["met_em_files"], [met_em_path.as_posix()])
+        self.assertEqual(mock_run.call_args.args[0][-1], "wrf-wps")
+
+    def test_collect_registers_hpc_wps_substep_outputs(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_task_collect_wps_substep")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        project_dir = runs_dir / "demo"
+        project_json = project_dir / "project.json"
+        state = load_project(project_json)
+        state["status"] = "data_ready"
+        state["execution"]["mode"] = "hpc"
+        save_project(state, project_json)
+
+        geo_em_path = project_dir / "wps" / "geo_em.d01.nc"
+        geo_em_path.parent.mkdir(parents=True, exist_ok=True)
+        geo_em_path.write_text("geo\n", encoding="utf-8")
+        geogrid_log = project_dir / "logs" / "wrf-wps-geogrid.log"
+        geogrid_log.parent.mkdir(parents=True, exist_ok=True)
+        geogrid_log.write_text("geogrid ok\n", encoding="utf-8")
+        (project_dir / "logs" / "wrf-wps-geogrid.log.state").write_text("completed\n", encoding="utf-8")
+
+        task = create_task_metadata(
+            "demo",
+            "wrf-wps",
+            "slurm",
+            project_dir,
+            "task-collect-wps-substep",
+            runs_dir=runs_dir,
+            config_path=CONFIG_PATH,
+            params={"selected_substeps": ["geogrid"]},
+        )
+        task["state"] = "completed"
+        task["job_id"] = "22335"
+        task["finished_at"] = "2024-07-20T00:00:00+00:00"
+        save_task(task)
+        store_active_task(project_json, "wrf-wps", task)
+        (task_dir(project_dir, "task-collect-wps-substep") / "rendered_job.json").write_text(
+            json.dumps(
+                {
+                    "remote_project_dir": "/scratch/user/wrf_runs/demo",
+                    "plan": {"selected_substeps": ["geogrid"]},
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with patch(
+            "scripts.wrf_task.subprocess.run",
+            return_value=subprocess.CompletedProcess(["collect_hpc.sh"], 0, "ok", ""),
+        ):
+            payload = collect_task("demo", task_id="task-collect-wps-substep", runs_dir=runs_dir)
+
+        state = load_project(project_json)
+        self.assertEqual(payload["task"]["state"], "completed")
+        self.assertEqual(state["status"], "data_ready")
+        self.assertEqual(state["substeps"]["wrf-wps"]["geogrid"]["state"], "completed")
+        self.assertEqual(state["substeps"]["wrf-wps"]["link_grib"]["state"], "stale")
+        self.assertEqual(state["substeps"]["wrf-wps"]["ungrib"]["state"], "stale")
+        self.assertEqual(state["substeps"]["wrf-wps"]["metgrid"]["state"], "stale")
 
     def test_collect_registers_hpc_outputs(self) -> None:
         runs_dir = make_test_dir("_test_wrf_task_collect")
@@ -555,13 +699,132 @@ class WrfTaskTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with patch("scripts.wrf_task.subprocess.run", return_value=subprocess.CompletedProcess(["collect_hpc.sh"], 0, "ok", "")):
+        with patch(
+            "scripts.wrf_task.subprocess.run",
+            return_value=subprocess.CompletedProcess(["collect_hpc.sh"], 0, "ok", ""),
+        ) as mock_run:
             payload = collect_task("demo", task_id="task-collect", runs_dir=runs_dir)
 
         state = load_project(project_json)
         self.assertEqual(payload["task"]["state"], "completed")
         self.assertEqual(state["status"], "completed")
         self.assertEqual(state["artifacts"]["wrfout_files"], [wrfout_path.as_posix()])
+        self.assertEqual(mock_run.call_args.args[0][-1], "wrf-run")
+
+    def test_collect_registers_hpc_run_real_only_substep_outputs(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_task_collect_run_real_only")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        project_dir = runs_dir / "demo"
+        project_json = project_dir / "project.json"
+        state = load_project(project_json)
+        state["status"] = "wps_ready"
+        state["execution"]["mode"] = "hpc"
+        save_project(state, project_json)
+
+        wrf_dir = project_dir / "wrf"
+        wrf_dir.mkdir(parents=True, exist_ok=True)
+        (wrf_dir / "wrfinput_d01").write_text("input\n", encoding="utf-8")
+        (wrf_dir / "wrfbdy_d01").write_text("bdy\n", encoding="utf-8")
+        real_log = project_dir / "logs" / "wrf-run-real.log"
+        real_log.parent.mkdir(parents=True, exist_ok=True)
+        real_log.write_text("real ok\n", encoding="utf-8")
+        (project_dir / "logs" / "wrf-run-real.log.state").write_text("completed\n", encoding="utf-8")
+
+        task = create_task_metadata(
+            "demo",
+            "wrf-run",
+            "slurm",
+            project_dir,
+            "task-collect-run-real-only",
+            runs_dir=runs_dir,
+            config_path=CONFIG_PATH,
+            params={"selected_substeps": ["real"]},
+        )
+        task["state"] = "completed"
+        task["job_id"] = "12347"
+        task["finished_at"] = "2024-07-20T00:00:00+00:00"
+        save_task(task)
+        store_active_task(project_json, "wrf-run", task)
+        (task_dir(project_dir, "task-collect-run-real-only") / "rendered_job.json").write_text(
+            json.dumps(
+                {
+                    "remote_project_dir": "/scratch/user/wrf_runs/demo",
+                    "plan": {"selected_substeps": ["real"]},
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with patch(
+            "scripts.wrf_task.subprocess.run",
+            return_value=subprocess.CompletedProcess(["collect_hpc.sh"], 0, "ok", ""),
+        ):
+            payload = collect_task("demo", task_id="task-collect-run-real-only", runs_dir=runs_dir)
+
+        state = load_project(project_json)
+        self.assertEqual(payload["task"]["state"], "completed")
+        self.assertEqual(state["status"], "real_ready")
+        self.assertEqual(state["substeps"]["wrf-run"]["real"]["state"], "completed")
+        self.assertEqual(state["substeps"]["wrf-run"]["wrf"]["state"], "stale")
+        self.assertEqual(state["artifacts"]["wrfout_files"], [])
+
+    def test_collect_registers_lightweight_hpc_outputs_without_wrfout(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_task_collect_lightweight")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        project_dir = runs_dir / "demo"
+        project_json = project_dir / "project.json"
+        state = load_project(project_json)
+        state["status"] = "wps_ready"
+        project_json.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+        wrf_dir = project_dir / "wrf"
+        output_dir = project_dir / "output" / "plots"
+        wrf_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (wrf_dir / "wrfinput_d01").write_text("input\n", encoding="utf-8")
+        (wrf_dir / "wrfbdy_d01").write_text("bdy\n", encoding="utf-8")
+        plot_path = output_dir / "surface-temperature.png"
+        sidecar_path = output_dir / "surface-temperature.json"
+        plot_path.write_text("plot\n", encoding="utf-8")
+        sidecar_path.write_text("{\"figure_id\": \"surface-temperature\"}\n", encoding="utf-8")
+
+        task = create_task_metadata(
+            "demo",
+            "wrf-run",
+            "slurm",
+            project_dir,
+            "task-collect-lightweight",
+            runs_dir=runs_dir,
+            config_path=CONFIG_PATH,
+            params={},
+        )
+        task["state"] = "completed"
+        task["job_id"] = "123"
+        task["finished_at"] = "2024-07-20T00:00:00+00:00"
+        save_task(task)
+        store_active_task(project_json, "wrf-run", task)
+        (task_dir(project_dir, "task-collect-lightweight") / "rendered_job.json").write_text(
+            json.dumps({"remote_project_dir": "/scratch/user/wrf_runs/demo"}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        with patch(
+            "scripts.wrf_task.subprocess.run",
+            return_value=subprocess.CompletedProcess(["collect_hpc.sh"], 0, "ok", ""),
+        ):
+            payload = collect_task("demo", task_id="task-collect-lightweight", runs_dir=runs_dir)
+
+        state = load_project(project_json)
+        self.assertEqual(payload["task"]["state"], "completed")
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["artifacts"]["wrfout_files"], [])
+        self.assertEqual(state["artifacts"]["plots"], [plot_path.as_posix()])
 
 
 if __name__ == "__main__":

@@ -12,11 +12,12 @@ Use this skill when the user asks things like “现在到哪了”, “还在�
 1. Read `runs/<project>/project.json`.
 2. Look at `project.json.execution.active_task` first, then `last_task` if there is no active task.
 3. Use `scripts/wrf.py status` to refresh live state.
-4. If the user wants logs, use `scripts/wrf.py logs` and summarize the useful tail.
-5. If the task is an HPC task in terminal state and outputs are not yet reflected locally, use `scripts/wrf.py collect`.
+4. If the user wants logs, use `scripts/wrf.py logs`; if they want one WPS / WRF substep specifically, use `scripts/wrf.py logs --substep <name>`.
+5. If the task is an HPC task in terminal state and outputs are not yet reflected locally, use `scripts/wrf.py collect`. This also updates synced substep logs and substep state.
 6. Report:
    - execution mode (`local`, or `hpc` with `login` / `ssh` access)
    - task step
+   - relevant substep state when the user is asking about one specific substep
    - backend
    - state
    - submitted/started/finished times
@@ -35,6 +36,11 @@ Read the latest useful log tail:
 python3 scripts/wrf.py logs --project-name demo --lines 100
 ```
 
+Read one substep log directly:
+```bash
+python3 scripts/wrf.py logs --project-name demo --substep real
+```
+
 Cancel an active task:
 ```bash
 python3 scripts/wrf.py cancel --project-name demo --task-id <task-id>
@@ -49,6 +55,7 @@ python3 scripts/wrf.py collect --project-name demo --config config/wrf_env.json
 
 - For local tasks, the task layer resolves progress from PID / exit code / local products.
 - For HPC tasks, the task layer resolves progress through the scheduler adapter `query()` result.
+- After an HPC `collect`, `project.json.substeps` is a useful source for which WPS / WRF substeps completed, failed, or remain stale.
 - Use `project.json.execution.access_mode` to explain whether progress is coming from login-node-local scheduler access or SSH-mediated scheduler access.
 - Do not guess progress from stale logs alone when `status` is available.
 - If `active_task.state` is `queued` or `running`, warn that config-changing steps should not be started concurrently.

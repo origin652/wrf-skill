@@ -28,11 +28,14 @@ try:
     from namelist_parser import read_namelist, write_namelist
     from project_state import (
         clear_error,
+        finish_substep,
         load_project,
+        mark_substeps_stale,
         posix_path,
         record_error,
         register_artifact,
         save_project,
+        start_substep,
         transition,
     )
 except ImportError:  # pragma: no cover
@@ -49,11 +52,14 @@ except ImportError:  # pragma: no cover
     from .namelist_parser import read_namelist, write_namelist
     from .project_state import (
         clear_error,
+        finish_substep,
         load_project,
+        mark_substeps_stale,
         posix_path,
         record_error,
         register_artifact,
         save_project,
+        start_substep,
         transition,
     )
 
@@ -63,6 +69,7 @@ STEP_CODE_MAP = {
     "real": "REAL_FAILED",
     "wrf": "WRF_FAILED",
 }
+RUN_SUBSTEPS = ("real", "wrf")
 
 
 def load_json(path: Path | str) -> dict[str, Any]:
@@ -185,6 +192,72 @@ def collect_wrfout_files(work_dir: Path, output_dir: Path) -> list[Path]:
             if path.is_file() and path not in wrfout_files:
                 wrfout_files.append(path)
     return wrfout_files
+
+
+def resolve_selected_run_substeps(
+    *,
+    only_step: str | None,
+    from_step: str | None,
+    need_real: bool,
+) -> list[str]:
+    if only_step and from_step:
+        raise ValueError("--only and --from cannot be used together")
+    if only_step:
+        if only_step not in RUN_SUBSTEPS:
+            raise ValueError(f"Unsupported WRF substep: {only_step}")
+        return [only_step]
+    if from_step:
+        if from_step not in RUN_SUBSTEPS:
+            raise ValueError(f"Unsupported WRF substep: {from_step}")
+        return list(RUN_SUBSTEPS[RUN_SUBSTEPS.index(from_step):])
+    if need_real:
+        return list(RUN_SUBSTEPS)
+    return ["wrf"]
+
+
+def collect_run_step_output_paths(
+    work_dir: Path,
+    output_dir: Path,
+    step_name: str,
+    *,
+    expected_inputs: list[Path],
+    boundary_path: Path,
+) -> list[Path]:
+    if step_name == "real":
+        outputs = [path for path in expected_inputs if path.exists() and path.is_file()]
+        if boundary_path.exists() and boundary_path.is_file():
+            outputs.append(boundary_path)
+        return outputs
+    if step_name == "wrf":
+        return collect_wrfout_files(work_dir, output_dir)
+    raise ValueError(f"Unsupported WRF substep: {step_name}")
+
+
+def invalidate_run_outputs(
+    work_dir: Path,
+    output_dir: Path,
+    start_step: str,
+    *,
+    expected_inputs: list[Path],
+    boundary_path: Path,
+) -> list[str]:
+    paths_to_remove: list[Path] = []
+    if start_step == "real":
+        paths_to_remove.extend(expected_inputs)
+        paths_to_remove.append(boundary_path)
+    paths_to_remove.extend(collect_wrfout_files(work_dir, output_dir))
+    paths_to_remove.extend(path for path in work_dir.glob("rsl.*") if path.is_file())
+    removed: list[str] = []
+    seen: set[str] = set()
+    for path in paths_to_remove:
+        key = posix_path(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.exists() and path.is_file():
+            path.unlink()
+            removed.append(key)
+    return removed
 
 
 
@@ -398,6 +471,7 @@ def build_plan(
     runtime_mode: str,
     np: int,
     boundary_path: Path,
+    selected_substeps: list[str],
 ) -> dict[str, Any]:
     return {
         "project_root": posix_path(project_root),
@@ -414,6 +488,7 @@ def build_plan(
         "runtime_mode": runtime_mode,
         "np": np,
         "commands": commands,
+        "selected_substeps": selected_substeps,
     }
 
 
@@ -508,6 +583,8 @@ def run_project(
     *,
     runs_dir: Path | str = "runs",
     config_path: Path | str = "config/wrf_env.json",
+    only_step: str | None = None,
+    from_step: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     runs_dir = Path(runs_dir)
@@ -543,9 +620,16 @@ def run_project(
     wrfinput_inventory = build_inventory(expected_inputs)
     boundary_exists = boundary_path.exists() and boundary_path.is_file()
     wrfout_files = collect_wrfout_files(work_dir, output_dir)
+    default_need_real = not (wrfinput_inventory["complete"] and boundary_exists)
+    selected_substeps = resolve_selected_run_substeps(
+        only_step=only_step,
+        from_step=from_step,
+        need_real=default_need_real,
+    )
+    force_execution = only_step is not None or from_step is not None
     source_run_dir = discover_source_run_dir(config)
     support_files = collect_support_files(source_run_dir)
-    need_real = not (wrfinput_inventory["complete"] and boundary_exists)
+    need_real = "real" in selected_substeps or default_need_real
 
     main_log_lines = [
         f"wrf-run project={project_name}",
@@ -557,6 +641,7 @@ def run_project(
         f"boundary_exists={boundary_exists}",
         f"existing_wrfout_count={len(wrfout_files)}",
         f"runtime_mode={runtime_mode_hint}",
+        f"selected_substeps={','.join(selected_substeps)}",
     ]
     for key, payload in namelist_sync.items():
         main_log_lines.append(f"sync_{key}={payload['old']}->{payload['new']} ({payload['source']})")
@@ -565,7 +650,7 @@ def run_project(
     np = max(1, int(config.get("local", {}).get("default_np") or 1))
     env_overrides: dict[str, str] = {}
     prepend_path: list[str] = []
-    should_resolve_runtime = dry_run or not wrfout_files
+    should_resolve_runtime = dry_run or force_execution or not wrfout_files
     if should_resolve_runtime:
         try:
             runtime_mode, commands, np, env_overrides, prepend_path = resolve_runtime_commands(
@@ -605,12 +690,13 @@ def run_project(
         runtime_mode=runtime_mode,
         np=np,
         boundary_path=boundary_path,
+        selected_substeps=selected_substeps,
     )
 
     preview_state = deepcopy(base_state)
     preview_state["execution"]["dry_run"] = dry_run
     preview_state["current_step"] = "wrf-run"
-    if wrfout_files:
+    if wrfout_files and not force_execution:
         complete_from_existing_outputs(
             preview_state,
             wrfinput_inventory=wrfinput_inventory,
@@ -633,7 +719,7 @@ def run_project(
 
     main_log_lines.append(f"np={np}")
 
-    if wrfout_files:
+    if wrfout_files and not force_execution:
         state = deepcopy(base_state)
         complete_from_existing_outputs(
             state,
@@ -674,6 +760,26 @@ def run_project(
 
     support_inventory = build_inventory(support_files)
     main_log_lines.append(f"support_file_count={support_inventory['existing_count']}")
+
+    state = deepcopy(base_state)
+    mark_substeps_stale(state, "wrf-run", from_substep=selected_substeps[0])
+    removed_outputs = invalidate_run_outputs(
+        work_dir,
+        output_dir,
+        selected_substeps[0],
+        expected_inputs=expected_inputs,
+        boundary_path=boundary_path,
+    )
+    if removed_outputs:
+        main_log_lines.append(f"invalidated_outputs={json.dumps(removed_outputs, ensure_ascii=True)}")
+    if selected_substeps[0] == "real":
+        if state["status"] in {"real_ready", "running", "completed"}:
+            state["status"] = "wps_ready"
+            state["current_step"] = "wrf-run"
+    elif selected_substeps[0] == "wrf" and state["status"] == "completed":
+        state["status"] = "real_ready"
+        state["current_step"] = "wrf-run"
+    save_project(state, project_json_path)
 
     clear_stale_met_em_files(work_dir, met_em_files)
     stage_files(met_em_files, work_dir)
@@ -717,8 +823,14 @@ def run_project(
                 main_log_lines=main_log_lines,
             )
 
-    state = deepcopy(base_state)
-    if need_real:
+    if "real" in selected_substeps:
+        start_substep(
+            state,
+            "wrf-run",
+            "real",
+            log_path=posix_path(real_log_path),
+        )
+        save_project(state, project_json_path)
         completed = subprocess.run(
             commands["real"],
             cwd=work_dir,
@@ -734,8 +846,20 @@ def run_project(
         output = combine_output(completed)
         write_step_log(real_log_path, commands["real"], work_dir, completed.returncode, output)
         if completed.returncode != 0:
+            finish_substep(
+                state,
+                "wrf-run",
+                "real",
+                substep_state="failed",
+                log_path=posix_path(real_log_path),
+                error={
+                    "code": STEP_CODE_MAP["real"],
+                    "message": output or "real.exe failed",
+                },
+            )
+            save_project(state, project_json_path)
             _failure(
-                base_state,
+                state,
                 project_json_path,
                 main_log_path,
                 code=STEP_CODE_MAP["real"],
@@ -743,6 +867,24 @@ def run_project(
                 log_path=real_log_path,
                 main_log_lines=main_log_lines,
             )
+        finish_substep(
+            state,
+            "wrf-run",
+            "real",
+            substep_state="completed",
+            log_path=posix_path(real_log_path),
+            outputs=[
+                posix_path(path)
+                for path in collect_run_step_output_paths(
+                    work_dir,
+                    output_dir,
+                    "real",
+                    expected_inputs=expected_inputs,
+                    boundary_path=boundary_path,
+                )
+            ],
+        )
+        save_project(state, project_json_path)
 
     wrfinput_inventory = build_inventory(expected_inputs)
     boundary_exists = boundary_path.exists() and boundary_path.is_file()
@@ -760,50 +902,95 @@ def run_project(
     real_ready_from_outputs(state, wrfinput_inventory=wrfinput_inventory, dry_run=False)
     save_project(state, project_json_path)
 
-    transition_sequence(state, ["running"], current_step="wrf-run")
-    save_project(state, project_json_path)
-
-    completed = subprocess.run(
-        commands["wrf"],
-        cwd=work_dir,
-        capture_output=True,
-        text=True,
-        check=False,
-        env=build_runtime_env(
-            commands["wrf"],
-            env_overrides=env_overrides,
-            prepend_path=prepend_path,
-        ),
-    )
-    output = combine_output(completed)
-    write_step_log(wrf_log_path, commands["wrf"], work_dir, completed.returncode, output)
-    if completed.returncode != 0:
-        _failure(
+    if "wrf" in selected_substeps:
+        transition_sequence(state, ["running"], current_step="wrf-run")
+        start_substep(
             state,
-            project_json_path,
-            main_log_path,
-            code=STEP_CODE_MAP["wrf"],
-            message=f"wrf.exe failed with exit code {completed.returncode}",
-            log_path=wrf_log_path,
-            main_log_lines=main_log_lines,
+            "wrf-run",
+            "wrf",
+            log_path=posix_path(wrf_log_path),
         )
+        save_project(state, project_json_path)
+
+        completed = subprocess.run(
+            commands["wrf"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=build_runtime_env(
+                commands["wrf"],
+                env_overrides=env_overrides,
+                prepend_path=prepend_path,
+            ),
+        )
+        output = combine_output(completed)
+        write_step_log(wrf_log_path, commands["wrf"], work_dir, completed.returncode, output)
+        if completed.returncode != 0:
+            finish_substep(
+                state,
+                "wrf-run",
+                "wrf",
+                substep_state="failed",
+                log_path=posix_path(wrf_log_path),
+                error={
+                    "code": STEP_CODE_MAP["wrf"],
+                    "message": output or "wrf.exe failed",
+                },
+            )
+            save_project(state, project_json_path)
+            _failure(
+                state,
+                project_json_path,
+                main_log_path,
+                code=STEP_CODE_MAP["wrf"],
+                message=f"wrf.exe failed with exit code {completed.returncode}",
+                log_path=wrf_log_path,
+                main_log_lines=main_log_lines,
+            )
+
+        wrfout_files = collect_wrfout_files(work_dir, output_dir)
+        if not wrfout_files:
+            finish_substep(
+                state,
+                "wrf-run",
+                "wrf",
+                substep_state="failed",
+                log_path=posix_path(wrf_log_path),
+                error={
+                    "code": "WRFOUT_MISSING",
+                    "message": "wrf.exe completed but no wrfout files were found",
+                },
+            )
+            save_project(state, project_json_path)
+            _failure(
+                state,
+                project_json_path,
+                main_log_path,
+                code="WRFOUT_MISSING",
+                message="wrf.exe completed but no wrfout files were found",
+                log_path=wrf_log_path,
+                main_log_lines=main_log_lines,
+            )
+        finish_substep(
+            state,
+            "wrf-run",
+            "wrf",
+            substep_state="completed",
+            log_path=posix_path(wrf_log_path),
+            outputs=[posix_path(path) for path in wrfout_files],
+        )
+        save_project(state, project_json_path)
 
     wrfout_files = collect_wrfout_files(work_dir, output_dir)
-    if not wrfout_files:
-        _failure(
-            state,
-            project_json_path,
-            main_log_path,
-            code="WRFOUT_MISSING",
-            message="wrf.exe completed but no wrfout files were found",
-            log_path=wrf_log_path,
-            main_log_lines=main_log_lines,
-        )
-
     complete_from_existing_outputs(
         state,
         wrfinput_inventory=wrfinput_inventory,
         wrfout_files=[posix_path(path) for path in wrfout_files],
+        dry_run=False,
+    ) if wrfout_files else real_ready_from_outputs(
+        state,
+        wrfinput_inventory=wrfinput_inventory,
         dry_run=False,
     )
     save_project(state, project_json_path)
@@ -833,6 +1020,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--runs-dir", default="runs")
     parser.add_argument("--config", default="config/wrf_env.json")
+    parser.add_argument("--only", choices=RUN_SUBSTEPS)
+    parser.add_argument("--from-step", "--from", dest="from_step", choices=RUN_SUBSTEPS)
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -844,6 +1033,8 @@ def main() -> int:
         args.project_name,
         runs_dir=args.runs_dir,
         config_path=args.config,
+        only_step=args.only,
+        from_step=args.from_step,
         dry_run=args.dry_run,
     )
     print(json.dumps(payload, indent=2))

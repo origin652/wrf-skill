@@ -66,7 +66,22 @@ def project_json_path(runs_dir: Path | str, project_name: str) -> Path:
     return project_root(runs_dir, project_name) / "project.json"
 
 
-def _resolve_paths_from_artifact(state: dict[str, Any], artifact_name: str) -> list[Path]:
+def _refresh_project_paths(state: dict[str, Any], project_dir: Path) -> None:
+    paths = state.setdefault("paths", {})
+    paths["project_root"] = posix_path(project_dir)
+    paths["data_dir"] = posix_path(project_dir / "data")
+    paths["wps_dir"] = posix_path(project_dir / "wps")
+    paths["wrf_dir"] = posix_path(project_dir / "wrf")
+    paths["output_dir"] = posix_path(project_dir / "output")
+    paths["log_dir"] = posix_path(project_dir / "logs")
+
+
+def _resolve_paths_from_artifact(
+    state: dict[str, Any],
+    artifact_name: str,
+    *,
+    project_dir: Path,
+) -> list[Path]:
     raw_value = state.get("artifacts", {}).get(artifact_name)
     if raw_value is None:
         return []
@@ -77,13 +92,31 @@ def _resolve_paths_from_artifact(state: dict[str, Any], artifact_name: str) -> l
     for item in items:
         if not item:
             continue
-        path = Path(str(item)).resolve()
+        path = Path(str(item))
+        if not path.is_absolute():
+            path = project_dir / path
+        path = path.resolve()
         key = path.as_posix()
         if key in seen:
             continue
         seen.add(key)
         resolved.append(path)
     return resolved
+
+
+def _discover_wrfout_paths(project_dir: Path) -> list[Path]:
+    discovered: list[Path] = []
+    seen: set[str] = set()
+    for parent in (project_dir / "wrf", project_dir / "output"):
+        for path in sorted(parent.glob("wrfout_d*")):
+            if not path.is_file():
+                continue
+            key = path.resolve().as_posix()
+            if key in seen:
+                continue
+            seen.add(key)
+            discovered.append(path.resolve())
+    return discovered
 
 
 def resolve_input_paths(
@@ -98,7 +131,15 @@ def resolve_input_paths(
 
     if mode == "project_artifacts":
         artifact_name = str(inputs.get("artifact") or "wrfout_files")
-        candidates = _resolve_paths_from_artifact(state, artifact_name)
+        candidates = _resolve_paths_from_artifact(
+            state,
+            artifact_name,
+            project_dir=project_dir,
+        )
+        if artifact_name == "wrfout_files":
+            for path in _discover_wrfout_paths(project_dir):
+                if path not in candidates:
+                    candidates.append(path)
     elif mode == "explicit_paths":
         candidates = []
         for raw_path in inputs.get("paths", []):
@@ -189,9 +230,10 @@ def run_postprocess(
     state = load_project(project_json)
     assert_mutation_allowed(state, "wrf-post")
 
-    project_dir = Path(state["paths"]["project_root"])
-    output_dir = Path(state["paths"]["output_dir"])
-    log_path = Path(state["paths"]["log_dir"]) / "wrf-post.log"
+    project_dir = project_root(runs_dir, project_name).resolve()
+    _refresh_project_paths(state, project_dir)
+    output_dir = project_dir / "output"
+    log_path = project_dir / "logs" / "wrf-post.log"
 
     raw_spec, resolved_spec_path = load_post_spec(project_name, project_dir, post_spec_path)
     spec = normalize_post_spec(raw_spec, project_name_fallback=project_name)

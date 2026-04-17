@@ -16,8 +16,8 @@ COMMAND_HELP = {
     "status": "Read the current task state.",
     "logs": "Read the current task logs.",
     "cancel": "Cancel the current task.",
-    "collect": "Collect terminal HPC outputs back into project state.",
-    "post": "Run post-processing for a project.",
+    "collect": "Collect terminal HPC outputs back into project state (lightweight by default for wrf-run).",
+    "post": "Run post-processing for a project. HPC wrf-run already post-processes remotely by default.",
     "cleanup": "Clean up temporary and stale directories.",
 }
 

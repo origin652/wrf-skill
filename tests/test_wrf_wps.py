@@ -313,6 +313,47 @@ class WrfWpsTests(unittest.TestCase):
         self.assertEqual(state["artifacts"]["met_em_files"], [met_em_path.as_posix()])
         self.assertTrue((runs_dir / "demo" / "logs" / "wrf-wps.log").exists())
 
+    def test_prepare_wps_only_geogrid_keeps_downstream_steps_stale(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_wps_only_geogrid")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_data_ready_project(runs_dir)
+
+        fake_wps_root = runs_dir / "_fake_wps_only_geogrid"
+        build_fake_wps_root(fake_wps_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.only_geogrid.json", wps_dir=fake_wps_root)
+
+        payload = prepare_wps("demo", runs_dir=runs_dir, config_path=config_copy, only_step="geogrid", dry_run=False)
+
+        state = json.loads((runs_dir / "demo" / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["project"]["status"], "data_ready")
+        self.assertEqual(state["status"], "data_ready")
+        self.assertEqual(state["substeps"]["wrf-wps"]["geogrid"]["state"], "completed")
+        self.assertEqual(state["substeps"]["wrf-wps"]["link_grib"]["state"], "stale")
+        self.assertEqual(state["substeps"]["wrf-wps"]["ungrib"]["state"], "stale")
+        self.assertEqual(state["substeps"]["wrf-wps"]["metgrid"]["state"], "stale")
+        self.assertTrue((runs_dir / "demo" / "wps" / "geo_em.d01.nc").exists())
+        self.assertEqual(state["artifacts"]["met_em_files"], [])
+
+    def test_prepare_wps_from_ungrib_resumes_remaining_steps(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_wps_from_ungrib")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_data_ready_project(runs_dir)
+
+        fake_wps_root = runs_dir / "_fake_wps_resume"
+        build_fake_wps_root(fake_wps_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.resume.json", wps_dir=fake_wps_root)
+
+        prepare_wps("demo", runs_dir=runs_dir, config_path=config_copy, dry_run=False)
+        payload = prepare_wps("demo", runs_dir=runs_dir, config_path=config_copy, from_step="ungrib", dry_run=False)
+
+        state = json.loads((runs_dir / "demo" / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["project"]["status"], "wps_ready")
+        self.assertEqual(state["substeps"]["wrf-wps"]["geogrid"]["state"], "completed")
+        self.assertEqual(state["substeps"]["wrf-wps"]["link_grib"]["state"], "completed")
+        self.assertEqual(state["substeps"]["wrf-wps"]["ungrib"]["state"], "completed")
+        self.assertEqual(state["substeps"]["wrf-wps"]["metgrid"]["state"], "completed")
+        self.assertTrue((runs_dir / "demo" / "wps" / "met_em.d01.2024-07-20_00:00:00.nc").exists())
+
     def test_prepare_wps_fails_when_forcing_files_are_missing(self) -> None:
         runs_dir = make_test_dir("_test_wrf_wps_missing_forcing")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))

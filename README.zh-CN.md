@@ -47,10 +47,10 @@ git clone https://github.com/origin652/wrf-skill.git
 cd wrf-skill
 
 # 2. 安装核心依赖
-pip install -e .
+python3 -m pip install -e .
 
 # 3. （可选）如果你要参与开发或运行测试
-pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"
 
 # 4. 验证安装
 python3 scripts/wrf.py --version
@@ -247,7 +247,24 @@ python3 scripts/wrf.py status --project-name my_case
 python3 scripts/wrf.py logs --project-name my_case
 
 # 如果是 HPC 作业，收集输出
+# 默认只同步日志、plots、sidecar JSON 和其他轻量产物，不回传 wrfout_d*
 python3 scripts/wrf.py collect --project-name my_case
+
+# ========== 6.5. 分步控制 WPS / WRF（本地和 HPC 都支持） ==========
+# 只运行某一个 WPS 子步骤
+python3 scripts/wrf.py wps --project-name my_case --only geogrid
+
+# 从某个 WPS 子步骤继续往后运行
+python3 scripts/wrf.py wps --project-name my_case --from ungrib
+
+# 只运行 real.exe
+python3 scripts/wrf.py run --project-name my_case --only real
+
+# 从 wrf.exe 继续
+python3 scripts/wrf.py run --project-name my_case --from wrf
+
+# 查看某个子步骤的日志
+python3 scripts/wrf.py logs --project-name my_case --substep real
 
 # ========== 7. 后处理和可视化 ==========
 # 生成后处理配置
@@ -256,7 +273,9 @@ python3 scripts/post_spec.py --project-name my_case --output post_spec.json
 # 或使用完整示例
 cp templates/post_spec.example.json post_spec.json
 
-# 运行后处理
+# 本地运行后处理
+# 注意：HPC 模式下，wrf-run 默认已经在远端自动执行后处理；
+# 只有在你本地保留了 wrfout 时，这一步才有必要再次手动执行
 python3 scripts/wrf.py post --project-name my_case --post-spec post_spec.json
 
 # 或渲染单个图形
@@ -481,6 +500,21 @@ cp config/wrf_env.hpc.example.json config/wrf_env.json
 }
 ```
 
+当前默认的 HPC `wrf-run` 行为是：
+
+- 作业在远端完成 `real.exe` 和 `wrf.exe` 后，会直接调用远端 `wrf_post.py`
+- `collect` 默认只回传日志、图像、sidecar JSON 和其他轻量产物，不回传 `wrfout_d*`
+- 如果远端后处理需要独立的 Python 环境，可以在 `hpc.post_runtime` 里单独配置
+
+现在 `--only` / `--from` 也支持 HPC 提交链路了。
+
+- `python3 scripts/wrf.py wps --project-name my_case --only geogrid --config config/wrf_env.json` 会只在远端执行 `geogrid`
+- `python3 scripts/wrf.py run --project-name my_case --from wrf --config config/wrf_env.json` 会只在远端继续执行 `wrf.exe` 和远端后处理
+- `python3 scripts/wrf.py logs --project-name my_case --substep wrf` 在 `collect` 之后可以直接看对应子步骤日志
+- 如果你要在 HPC 上跳过前置步骤，本地项目里必须已经有对应前置产物，这样 `sync_hpc.sh` 才能把它们同步到远端
+  例如：`wps --from ungrib` 需要本地已有 `GRIBFILE.*`
+  例如：`run --from wrf` 需要本地已有 `wrfinput_d*` 和 `wrfbdy_d01`
+
 ---
 
 ## 在 Codex 中使用
@@ -561,16 +595,16 @@ A: 欢迎提交 Pull Request！请先阅读贡献指南。
 
 ```bash
 # 安装开发依赖
-pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"
 
 # 运行测试
-pytest tests/
+python3 -m pytest tests/
 
 # 代码检查
-ruff check scripts/
+python3 -m ruff check scripts/
 
 # 类型检查
-mypy scripts/
+python3 -m mypy scripts/
 ```
 
 ---

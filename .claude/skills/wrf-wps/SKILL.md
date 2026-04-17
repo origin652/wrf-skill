@@ -13,8 +13,9 @@ Use this skill when forcing data and namelists are ready and the user wants WPS 
 2. Use `scripts/wrf.py wps` as the default user-facing entry point.
 3. In local mode the detached worker executes `scripts/wrf_wps.py`; in HPC mode the task layer runs `admission -> sync -> adapter.render_job -> adapter.submit -> status/query -> collect`.
 4. Save logs under `runs/<project>/logs/` and task logs under `runs/<project>/tasks/<task-id>/`.
-5. Register `met_em*` artifacts and move the project to `wps_ready` when complete.
-6. Use `scripts/wrf.py status` and `scripts/wrf.py logs` to report progress in later turns.
+5. Support substep-level execution with `--only` / `--from` for both local and HPC runs.
+6. Register `met_em*` artifacts and move the project to `wps_ready` when complete.
+7. Use `scripts/wrf.py status`, `scripts/wrf.py logs`, and `scripts/wrf.py logs --substep <name>` to report progress in later turns.
 
 ## Examples
 
@@ -34,9 +35,17 @@ python3 scripts/wrf.py status --project-name demo
 python3 scripts/wrf.py logs --project-name demo --lines 120
 ```
 
+Run only one substep or resume from one:
+```bash
+python3 scripts/wrf.py wps --project-name demo --only geogrid
+python3 scripts/wrf.py wps --project-name demo --from ungrib --config config/wrf_env.json
+python3 scripts/wrf.py logs --project-name demo --substep metgrid
+```
+
 ## Notes
 
 - WPS HPC runtime is selected from `hpc.wps_runtime`: use `project` for synced project-local binaries, `remote_wps_dir` for cluster-installed WPS, or `custom` for explicit `geogrid_cmd` / `link_grib_cmd` / `ungrib_cmd` / `metgrid_cmd`.
+- If `--from` skips earlier WPS steps on HPC, the needed prerequisite files must already exist in the local project before sync. For example, `--from ungrib` needs local `GRIBFILE.*`.
 - Do not keep the AI turn waiting for large WPS runs by default.
 - Treat `project.json.execution.active_task` as the current progress source.
 

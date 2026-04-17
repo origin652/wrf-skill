@@ -231,6 +231,28 @@ class HpcAdapterTests(unittest.TestCase):
         self.assertNotIn("conda activate", script)
         self.assertTrue((project_root / "hpc" / "demo.slurm.job.sh").exists())
 
+    def test_render_job_supports_remote_post_runtime_via_config(self) -> None:
+        adapter = get_scheduler_adapter("slurm")
+        config = self.slurm_config()
+        config["hpc"]["post_runtime"] = {
+            "setup_commands": ["module purge"],
+            "modules": ["wrf-post/1.0"],
+            "python_env": "wrf-post",
+            "python_cmd": ["python3", "-u"],
+        }
+        project_state, plan, project_root = self.render_fixture()
+
+        rendered = adapter.render_job(project_state, plan, config)
+        script = Path(rendered["script_path"]).read_text(encoding="utf-8")
+
+        self.assertIn("module load wrf-post/1.0", script)
+        self.assertIn("conda activate wrf-post", script)
+        self.assertIn(
+            "python3 -u /scratch/user/wrf_runs/demo/.wrf-skill/scripts/wrf_post.py --project-name demo --runs-dir /scratch/user/wrf_runs",
+            script,
+        )
+        self.assertTrue((project_root / "hpc" / "demo.slurm.job.sh").exists())
+
     def test_render_job_supports_remote_wps_runtime_via_config(self) -> None:
         adapter = get_scheduler_adapter("slurm")
         config = self.slurm_config()
@@ -263,6 +285,53 @@ class HpcAdapterTests(unittest.TestCase):
         self.assertIn("$WPS_HOME/ungrib.exe", script)
         self.assertIn("$WPS_HOME/metgrid.exe", script)
         self.assertTrue((project_root / "hpc" / "demo.wrf-wps.slurm.job.sh").exists())
+
+    def test_render_job_supports_wps_substep_selection(self) -> None:
+        adapter = get_scheduler_adapter("slurm")
+        config = self.slurm_config()
+        config["hpc"]["wps_runtime"] = {
+            "mode": "remote_wps_dir",
+            "remote_wps_dir": "$WPS_HOME",
+        }
+        project_state, plan, project_root = self.render_fixture()
+        forcing_path = project_root / "data" / "gfs.t00z.pgrb2.1p00.f000"
+        forcing_path.parent.mkdir(parents=True, exist_ok=True)
+        forcing_path.write_text("gfs\n", encoding="utf-8")
+        wps_plan = {
+            **plan,
+            "step": "wrf-wps",
+            "forcing_files": [forcing_path.as_posix()],
+            "selected_substeps": ["ungrib", "metgrid"],
+        }
+
+        rendered = adapter.render_job(project_state, wps_plan, config)
+        script = Path(rendered["script_path"]).read_text(encoding="utf-8")
+
+        self.assertIn('printf \'selected_substeps=%s\\n\' "ungrib,metgrid"', script)
+        self.assertIn('run_logged_step "ungrib"', script)
+        self.assertIn('run_logged_step "metgrid"', script)
+        self.assertNotIn('run_logged_step "geogrid"', script)
+        self.assertNotIn('run_logged_step "link_grib"', script)
+        self.assertIn("rm -f FILE:* PFILE:* GFS:* met_em.d*.nc", script)
+
+    def test_render_job_supports_run_substep_selection(self) -> None:
+        adapter = get_scheduler_adapter("slurm")
+        config = self.slurm_config()
+        config["hpc"]["runtime"] = {
+            "mode": "remote_run_dir",
+            "remote_run_dir": "$WRF_HOME/run",
+            "launcher_cmd": "mpiexec",
+            "tasks_flag": "-n",
+        }
+        project_state, plan, _ = self.render_fixture()
+        rendered = adapter.render_job(project_state, {**plan, "selected_substeps": ["wrf"]}, config)
+        script = Path(rendered["script_path"]).read_text(encoding="utf-8")
+
+        self.assertIn('printf \'selected_substeps=%s\\n\' "wrf"', script)
+        self.assertIn('run_logged_step "wrf"', script)
+        self.assertNotIn('run_logged_step "real"', script)
+        self.assertIn("rm -f wrfout_d* rsl.*", script)
+        self.assertIn("python3 /scratch/user/wrf_runs/demo/.wrf-skill/scripts/wrf_post.py", script)
 
     def test_validate_config_rejects_incomplete_custom_runtime(self) -> None:
         adapter = get_scheduler_adapter("slurm")

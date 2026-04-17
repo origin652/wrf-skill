@@ -120,7 +120,7 @@ class SkillBundleTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="wrf-skill-bundle-test-") as tmp_dir:
             with tarfile.open(archive_path, "r:gz") as archive:
-                archive.extractall(tmp_dir)
+                archive.extractall(tmp_dir, filter="data")
             manifest = json.loads(
                 (Path(tmp_dir) / "wrf-skill-bundle" / BUNDLE_MANIFEST_NAME).read_text(encoding="utf-8")
             )

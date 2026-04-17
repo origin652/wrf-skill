@@ -378,6 +378,47 @@ class WrfRunTests(unittest.TestCase):
         self.assertEqual(state["status"], "completed")
         self.assertEqual(state["artifacts"]["wrfout_files"], [wrfout_path.as_posix()])
 
+    def test_run_project_only_real_stops_at_real_ready(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_run_only_real")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        fake_wps_root = runs_dir / "_fake_wps_only_real"
+        fake_wrf_root = runs_dir / "_fake_wrf_only_real"
+        build_fake_wps_root(fake_wps_root)
+        build_fake_wrf_root(fake_wrf_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.only_real.json", wps_dir=fake_wps_root, wrf_dir=fake_wrf_root)
+        self.init_wps_ready_project(runs_dir, config_copy)
+
+        payload = run_project("demo", runs_dir=runs_dir, config_path=config_copy, only_step="real", dry_run=False)
+
+        state = json.loads((runs_dir / "demo" / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["project"]["status"], "real_ready")
+        self.assertEqual(state["status"], "real_ready")
+        self.assertEqual(state["substeps"]["wrf-run"]["real"]["state"], "completed")
+        self.assertEqual(state["substeps"]["wrf-run"]["wrf"]["state"], "stale")
+        self.assertEqual(state["artifacts"]["wrfout_files"], [])
+
+    def test_run_project_from_wrf_resumes_after_real(self) -> None:
+        runs_dir = make_test_dir("_test_wrf_run_from_wrf")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+
+        fake_wps_root = runs_dir / "_fake_wps_from_wrf"
+        fake_wrf_root = runs_dir / "_fake_wrf_from_wrf"
+        build_fake_wps_root(fake_wps_root)
+        build_fake_wrf_root(fake_wrf_root)
+        config_copy = write_config_copy(CONFIG_PATH, runs_dir / "wrf_env.from_wrf.json", wps_dir=fake_wps_root, wrf_dir=fake_wrf_root)
+        self.init_wps_ready_project(runs_dir, config_copy)
+
+        run_project("demo", runs_dir=runs_dir, config_path=config_copy, only_step="real", dry_run=False)
+        payload = run_project("demo", runs_dir=runs_dir, config_path=config_copy, from_step="wrf", dry_run=False)
+
+        state = json.loads((runs_dir / "demo" / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["project"]["status"], "completed")
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["substeps"]["wrf-run"]["real"]["state"], "completed")
+        self.assertEqual(state["substeps"]["wrf-run"]["wrf"]["state"], "completed")
+        self.assertEqual(len(state["artifacts"]["wrfout_files"]), 1)
+
     def test_run_project_fails_without_met_em_files(self) -> None:
         runs_dir = make_test_dir("_test_wrf_run_missing_met_em")
         self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))

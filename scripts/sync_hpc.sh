@@ -31,6 +31,7 @@ REMOTE_HOST="$3"
 REMOTE_PROJECT_DIR="$4"
 SYNC_SCOPE="wrf-run"
 DRY_RUN_FLAG=""
+SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ $# -ge 5 ]]; then
   if [[ "$5" == "--dry-run" ]]; then
@@ -43,13 +44,13 @@ fi
 
 case "$SYNC_SCOPE" in
   wrf-run)
-    RSYNC_ARGS=(-av --delete --exclude data --exclude output)
+    RSYNC_ARGS=(-av --delete --exclude .wrf-skill --exclude data --exclude output)
     ;;
   wrf-wps)
-    RSYNC_ARGS=(-av --delete --exclude output)
+    RSYNC_ARGS=(-av --delete --exclude .wrf-skill --exclude output)
     ;;
   all)
-    RSYNC_ARGS=(-av --delete)
+    RSYNC_ARGS=(-av --delete --exclude .wrf-skill)
     ;;
   *)
     echo "sync_hpc.sh: unsupported sync_scope=$SYNC_SCOPE" >&2
@@ -57,21 +58,27 @@ case "$SYNC_SCOPE" in
     ;;
 esac
 
+SKILL_RSYNC_ARGS=(-av --delete --exclude __pycache__ --exclude '*.pyc')
+
 if [[ "$DRY_RUN_FLAG" == "--dry-run" ]]; then
   RSYNC_ARGS+=(--dry-run)
+  SKILL_RSYNC_ARGS+=(--dry-run)
 fi
 
 case "$ACCESS_MODE" in
   login)
-    mkdir -p "$REMOTE_PROJECT_DIR"
+    mkdir -p "$REMOTE_PROJECT_DIR/.wrf-skill"
     rsync "${RSYNC_ARGS[@]}" "$LOCAL_PROJECT_DIR/" "$REMOTE_PROJECT_DIR/"
+    rsync "${SKILL_RSYNC_ARGS[@]}" "$SCRIPT_SOURCE_DIR/" "$REMOTE_PROJECT_DIR/.wrf-skill/scripts/"
     ;;
   ssh)
     if [[ -z "$REMOTE_HOST" || "$REMOTE_HOST" == "-" ]]; then
       echo "sync_hpc.sh: ssh mode requires remote_host" >&2
       exit 2
     fi
+    ssh "$REMOTE_HOST" "mkdir -p \"$REMOTE_PROJECT_DIR/.wrf-skill\""
     rsync "${RSYNC_ARGS[@]}" "$LOCAL_PROJECT_DIR/" "${REMOTE_HOST}:${REMOTE_PROJECT_DIR}/"
+    rsync "${SKILL_RSYNC_ARGS[@]}" "$SCRIPT_SOURCE_DIR/" "${REMOTE_HOST}:${REMOTE_PROJECT_DIR}/.wrf-skill/scripts/"
     ;;
   *)
     echo "sync_hpc.sh: unsupported access_mode=$ACCESS_MODE" >&2
