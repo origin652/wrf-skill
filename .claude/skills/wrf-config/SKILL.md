@@ -1,6 +1,6 @@
 ---
 name: wrf-config
-description: Convert natural-language and structured research-grade WRF requirements into `schema_version=2` `simulation_spec.json`, validate them, render namelists, and gate HPC requests with admission before final config is written.
+description: Convert natural-language and structured research-grade WRF requirements into `schema_version=2` `simulation_spec.json`, validate them, render namelists, import or improve existing namelists through structured specs, and gate HPC requests with admission before final config is written.
 ---
 
 # WRF Config
@@ -15,13 +15,14 @@ Use this skill when the user wants to define or update domains, timing, physics 
 2. If `project.json.execution.active_task.state` is `queued` or `running`, do not mutate config.
 3. Normalize the current spec to the v2 structured view before making decisions.
 4. Prefer `scripts/wrf.py config` as the public entry point. `scripts/wrf_config.py` remains the implementation and compatibility entry.
-5. For simple requests, use presets and `--request-text`. For research-grade requests, prefer `--spec-fragment-json` plus targeted `--override`.
-6. Update the temporary spec from presets, request text, structured fragments, and supported override paths.
-7. Use per-domain overrides when needed, for example `domains.<index>.physics.*` and `domains.<index>.geog_data_res`.
-8. Validate through `scripts/render_config.py`. This now checks structured spec semantics and rendered namelist validity.
-9. If `run_mode=hpc`, let the config layer run admission before writing final config.
-10. If admission returns `rejected` or `unverified`, stop there and return the decision, reason codes, and alternatives.
-11. If accepted, write `simulation_spec.json`, `namelist.wps`, and `namelist.input`, then reset downstream artifact registration.
+5. For existing manual WRF cases, use `scripts/wrf.py import-namelists` to convert `namelist.input` and `namelist.wps` into an AI-readable `schema_version=2` spec before editing, or `scripts/wrf.py improve-namelists` to import, modify, validate, and re-render in one step.
+6. For simple requests, use presets and `--request-text`. For research-grade requests, prefer `--spec-fragment-json` plus targeted `--override`.
+7. Update the temporary spec from presets, request text, structured fragments, and supported override paths.
+8. Use per-domain overrides when needed, for example `domains.<index>.physics.*` and `domains.<index>.geog_data_res`.
+9. Validate through `scripts/render_config.py`. This now checks structured spec semantics and rendered namelist validity.
+10. If `run_mode=hpc`, let the config layer run admission before writing final config.
+11. If admission returns `rejected` or `unverified`, stop there and return the decision, reason codes, and alternatives.
+12. If accepted, write `simulation_spec.json`, `namelist.wps`, and `namelist.input`, then reset downstream artifact registration.
 
 ## Examples
 
@@ -53,6 +54,47 @@ python3 scripts/wrf.py config \
   --override model.namelist_input.domains.parent_time_step_ratio=[1,3]
 ```
 
+Import existing namelists into a structured spec:
+```bash
+python3 scripts/wrf.py import-namelists \
+  --project-name legacy_case \
+  --namelist-input runs/legacy_case/wrf/namelist.input \
+  --namelist-wps runs/legacy_case/wps/namelist.wps \
+  --out runs/legacy_case/simulation_spec.json
+```
+
+Improve existing namelists with structured and direct overrides:
+```bash
+python3 scripts/wrf.py improve-namelists \
+  --project-name legacy_case \
+  --namelist-input runs/legacy_case/wrf/namelist.input \
+  --namelist-wps runs/legacy_case/wps/namelist.wps \
+  --override timing.history_interval_minutes=30 \
+  --override physics.cu_physics=0 \
+  --namelist-override dynamics.w_damping=1 \
+  --out-dir runs/legacy_case/improved \
+  --spec-out runs/legacy_case/improved/simulation_spec.json
+```
+
+Preview the exact namelist changes before writing:
+```bash
+python3 scripts/wrf.py improve-namelists \
+  --project-name legacy_case \
+  --namelist-input runs/legacy_case/wrf/namelist.input \
+  --namelist-wps runs/legacy_case/wps/namelist.wps \
+  --override timing.history_interval_minutes=30 \
+  --dry-run \
+  --diff
+```
+
+Safely improve an existing managed project in place:
+```bash
+python3 scripts/wrf.py improve-namelists \
+  --project-name legacy_case \
+  --runs-dir runs \
+  --override timing.history_interval_minutes=30
+```
+
 HPC config preview without writing files yet:
 ```bash
 python3 scripts/wrf.py config \
@@ -74,6 +116,9 @@ python3 scripts/wrf.py config \
 
 ## Notes
 
+- `import-namelists` infers timing, domains, nesting, physics, WPS projection fields, and data source where possible. It stores source snapshots in `experimental.imported_namelist_input` and `experimental.imported_namelist_wps` unless `--no-raw` is used; these snapshot fields are informational and do not override future rendering. Check `experimental.import_diagnostics` for inferred sources, defaulted fields, warnings, and unstructured fields carried forward under `model.namelist_input`.
+- `improve-namelists` imports existing namelists, applies `--request-text`, presets, `--spec-fragment-json`, structured `--override`, and direct `--namelist-override`, validates the structured spec, then writes improved `namelist.input` and `namelist.wps` to `--out-dir`. Its JSON output includes `diagnostics` and a machine-readable `diff`; use `--diff` for a human-readable preview.
+- Use `--runs-dir runs --project-name <project>` to improve a managed project in place. This reads `project.json`, refuses to mutate while a queued or running task exists, writes canonical namelists and `simulation_spec.json`, registers artifacts, resets downstream state, and writes `logs/wrf-improve-namelists.log`.
 - Prefer preset-driven configuration first, then switch to structured v2 spec fields when the request becomes research-grade.
 - Use `request-text` for common natural-language inputs such as time range, domain names, physics intent, and local/HPC mode. Do not expect it to infer detailed research settings.
 - Use `--spec-fragment-json` for complex cases that need explicit `timing`, `wps`, `model.namelist_input`, or `experimental` content.
@@ -96,4 +141,5 @@ python3 scripts/wrf.py config \
 - `scripts/spec_utils.py`
 - `scripts/wrf_config.py`
 - `scripts/render_config.py`
+- `scripts/namelist_to_spec.py`
 - `scripts/project_state.py`

@@ -8,15 +8,20 @@ from typing import Any
 
 SECTION_START_RE = re.compile(r"^\s*&([A-Za-z0-9_]+)\s*$")
 SECTION_END_RE = re.compile(r"^\s*/\s*$")
+ASSIGNMENT_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
+REPEAT_RE = re.compile(r"^(\d+)\*(.+)$")
 
 
 def _strip_comment(line: str) -> str:
-    in_quote = False
+    quote: str | None = None
     result: list[str] = []
     for char in line:
-        if char == "'":
-            in_quote = not in_quote
-        if char == "!" and not in_quote:
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        if char == "!" and quote is None:
             break
         result.append(char)
     return "".join(result).rstrip()
@@ -25,11 +30,14 @@ def _strip_comment(line: str) -> str:
 def _split_values(raw_value: str) -> list[str]:
     tokens: list[str] = []
     current: list[str] = []
-    in_quote = False
+    quote: str | None = None
     for char in raw_value:
-        if char == "'":
-            in_quote = not in_quote
-        if char == "," and not in_quote:
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        if char == "," and quote is None:
             token = "".join(current).strip()
             if token:
                 tokens.append(token)
@@ -42,23 +50,33 @@ def _split_values(raw_value: str) -> list[str]:
     return tokens
 
 
-def _parse_token(token: str) -> Any:
+def _parse_scalar_token(token: str) -> Any:
+    token = token.strip()
     lowered = token.lower()
-    if lowered == ".true.":
+    if lowered in {".true.", "true"}:
         return True
-    if lowered == ".false.":
+    if lowered in {".false.", "false"}:
         return False
-    if token.startswith("'") and token.endswith("'"):
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}:
         return token[1:-1]
     try:
         return int(token)
     except ValueError:
         pass
     try:
-        return float(token)
+        return float(re.sub(r"([0-9.])[dD]([+-]?\d+)$", r"\1e\2", token))
     except ValueError:
         pass
     return token
+
+
+def _parse_token(token: str) -> list[Any]:
+    repeat_match = REPEAT_RE.match(token.strip())
+    if repeat_match:
+        count = int(repeat_match.group(1))
+        value = _parse_scalar_token(repeat_match.group(2).strip())
+        return [value for _ in range(count)]
+    return [_parse_scalar_token(token)]
 
 
 def _render_value(value: Any) -> str:
@@ -75,9 +93,26 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+def _parse_value(raw_value: str) -> Any:
+    raw_value = raw_value.rstrip(",").strip()
+    tokens: list[Any] = []
+    for token in _split_values(raw_value):
+        tokens.extend(_parse_token(token))
+    return tokens[0] if len(tokens) == 1 else tokens
+
+
 def read_namelist_text(text: str) -> dict[str, dict[str, Any]]:
     current_section: str | None = None
+    current_key: str | None = None
+    current_value_parts: list[str] = []
     parsed: dict[str, dict[str, Any]] = {}
+
+    def flush_assignment() -> None:
+        nonlocal current_key, current_value_parts
+        if current_section is not None and current_key is not None:
+            parsed[current_section][current_key] = _parse_value(" ".join(current_value_parts))
+        current_key = None
+        current_value_parts = []
 
     for raw_line in text.splitlines():
         line = _strip_comment(raw_line).strip()
@@ -86,23 +121,30 @@ def read_namelist_text(text: str) -> dict[str, dict[str, Any]]:
 
         section_match = SECTION_START_RE.match(line)
         if section_match:
+            flush_assignment()
             current_section = section_match.group(1)
             parsed[current_section] = {}
             continue
 
         if SECTION_END_RE.match(line):
+            flush_assignment()
             current_section = None
             continue
 
-        if current_section is None or "=" not in line:
+        if current_section is None:
             continue
 
-        key, raw_value = line.split("=", 1)
-        key = key.strip()
-        raw_value = raw_value.rstrip(",").strip()
-        tokens = [_parse_token(token) for token in _split_values(raw_value)]
-        parsed[current_section][key] = tokens[0] if len(tokens) == 1 else tokens
+        assignment_match = ASSIGNMENT_RE.match(line)
+        if assignment_match:
+            flush_assignment()
+            current_key = assignment_match.group(1).strip()
+            current_value_parts = [assignment_match.group(2).strip()]
+            continue
 
+        if current_key is not None:
+            current_value_parts.append(line)
+
+    flush_assignment()
     return parsed
 
 

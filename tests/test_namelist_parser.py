@@ -2,7 +2,7 @@ import shutil
 import unittest
 from pathlib import Path
 
-from scripts.namelist_parser import read_namelist, validate_namelist, write_namelist
+from scripts.namelist_parser import read_namelist, read_namelist_text, validate_namelist, write_namelist
 
 TMP_ROOT = Path(__file__).resolve().parents[1] / "runs"
 
@@ -57,6 +57,25 @@ class NamelistParserTests(unittest.TestCase):
         }
         errors = validate_namelist(config)
         self.assertIn("e_we length must match max_dom", errors)
+
+    def test_parser_handles_common_fortran_namelist_forms(self) -> None:
+        text = r"""
+&time_control
+ title = "a ! literal",
+ history_interval = 2*30,
+ coeff = 1.0d-3,
+ auxhist2_outname = "wrfout",
+                   "auxout",
+ restart = .false.,
+/
+"""
+        parsed = read_namelist_text(text)
+
+        self.assertEqual(parsed["time_control"]["title"], "a ! literal")
+        self.assertEqual(parsed["time_control"]["history_interval"], [30, 30])
+        self.assertEqual(parsed["time_control"]["coeff"], 0.001)
+        self.assertEqual(parsed["time_control"]["auxhist2_outname"], ["wrfout", "auxout"])
+        self.assertFalse(parsed["time_control"]["restart"])
 
 
 if __name__ == "__main__":

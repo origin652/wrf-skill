@@ -1,6 +1,6 @@
 ---
 name: wrf-config
-description: Convert natural-language and structured research-grade WRF requirements into `schema_version=2` `simulation_spec.json`, validate them, render namelists, and gate HPC requests with admission before final config is written.
+description: Convert natural-language and structured research-grade WRF requirements into `schema_version=2` `simulation_spec.json`, validate them, render namelists, import or improve existing namelists through structured specs, and gate HPC requests with admission before final config is written.
 ---
 
 # WRF Config
@@ -19,4 +19,5 @@ This plugin skill is a thin wrapper that exposes the canonical workspace skill a
 - `scripts/wrf.py`
 - `scripts/wrf_config.py`
 - `scripts/render_config.py`
+- `scripts/namelist_to_spec.py`
 - `config/simulation_schema.json`

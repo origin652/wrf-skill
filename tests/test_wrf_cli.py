@@ -31,6 +31,46 @@ class WrfCliTests(unittest.TestCase):
         )
         self.assertFalse(mocked_run.call_args.kwargs["check"])
 
+    def test_import_namelists_forwards_to_converter(self) -> None:
+        with patch(
+            "scripts.wrf.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0),
+        ) as mocked_run:
+            exit_code = wrf.main(["import-namelists", "--namelist-input", "namelist.input"])
+
+        self.assertEqual(exit_code, 0)
+        forwarded = mocked_run.call_args.args[0]
+        self.assertEqual(
+            forwarded,
+            [
+                sys.executable,
+                str(Path(wrf.__file__).resolve().parent / "namelist_to_spec.py"),
+                "--namelist-input",
+                "namelist.input",
+            ],
+        )
+
+    def test_improve_namelists_forwards_to_converter_improve_mode(self) -> None:
+        with patch(
+            "scripts.wrf.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0),
+        ) as mocked_run:
+            exit_code = wrf.main(["improve-namelists", "--namelist-input", "namelist.input", "--dry-run"])
+
+        self.assertEqual(exit_code, 0)
+        forwarded = mocked_run.call_args.args[0]
+        self.assertEqual(
+            forwarded,
+            [
+                sys.executable,
+                str(Path(wrf.__file__).resolve().parent / "namelist_to_spec.py"),
+                "improve",
+                "--namelist-input",
+                "namelist.input",
+                "--dry-run",
+            ],
+        )
+
     def test_data_forwards_to_task_start_with_fixed_step(self) -> None:
         with patch(
             "scripts.wrf.subprocess.run",

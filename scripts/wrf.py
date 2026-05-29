@@ -10,6 +10,8 @@ __version__ = "0.1.0"
 COMMAND_HELP = {
     "init": "Initialize a project scaffold.",
     "config": "Render simulation_spec.json and namelists.",
+    "import-namelists": "Import existing namelists into a structured simulation_spec.json.",
+    "improve-namelists": "Improve existing namelists through the structured spec renderer.",
     "data": "Start the async forcing-data task.",
     "wps": "Start the async WPS task.",
     "run": "Start the async WRF task.",
@@ -49,6 +51,10 @@ def build_forward_command(command: str, extra_args: Sequence[str]) -> list[str]:
         return [sys.executable, str(script_root / "wrf_init.py"), *extra_args]
     if command == "config":
         return [sys.executable, str(script_root / "wrf_config.py"), *extra_args]
+    if command == "import-namelists":
+        return [sys.executable, str(script_root / "namelist_to_spec.py"), *extra_args]
+    if command == "improve-namelists":
+        return [sys.executable, str(script_root / "namelist_to_spec.py"), "improve", *extra_args]
     if command in TASK_STEP_COMMANDS:
         return [
             sys.executable,
@@ -81,8 +87,22 @@ def print_help() -> None:
     print("  python3 scripts/wrf.py --version")
     print()
     print("Commands:")
-    for name in ("init", "config", "data", "wps", "run", "status", "logs", "cancel", "collect", "post", "cleanup"):
-        print(f"  {name:<8}{COMMAND_HELP[name]}")
+    for name in (
+        "init",
+        "config",
+        "import-namelists",
+        "improve-namelists",
+        "data",
+        "wps",
+        "run",
+        "status",
+        "logs",
+        "cancel",
+        "collect",
+        "post",
+        "cleanup",
+    ):
+        print(f"  {name:<18}{COMMAND_HELP[name]}")
     print()
     print("Global options:")
     print("  --version    Show version and exit")
