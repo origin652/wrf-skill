@@ -107,6 +107,32 @@ def resolve_ssh_command(config: dict[str, Any]) -> list[str]:
     return render_command(hpc.get("scheduler_ssh_cmd") or hpc.get("ssh_command") or "ssh")
 
 
+def build_remote_command_argv(
+    remote_command: str,
+    *,
+    config: dict[str, Any],
+) -> list[str]:
+    """Build the argv to execute a remote shell command per the configured HPC access mode.
+
+    login -> the remote command is run locally (shlex.split of the command string);
+    ssh   -> ``[ssh... , host, "sh", "-c", quoted_remote_command]``.
+
+    Unlike ``run_scheduler_command`` this only constructs the argv so the caller can
+    stream the command's stdout via ``subprocess.Popen`` (e.g. ``tail -F``).
+    Raises ``CommandExecutionError`` if access_mode is unsupported or the ssh host is missing.
+    """
+    access_mode = resolve_access_mode(config)
+    if access_mode == "login":
+        return shlex.split(remote_command)
+    if access_mode != "ssh":
+        raise CommandExecutionError(f"Unsupported HPC access_mode: {access_mode}")
+
+    scheduler_host = resolve_scheduler_host(config) or resolve_transfer_host(config)
+    if not scheduler_host:
+        raise CommandExecutionError("HPC access_mode=ssh requires hpc.remote_host or hpc.scheduler_host")
+    return resolve_ssh_command(config) + [scheduler_host, "sh", "-c", shlex.quote(remote_command)]
+
+
 def run_command(
     command: list[str] | str,
     *,
@@ -144,17 +170,7 @@ def run_scheduler_command(
     if access_mode != "ssh":
         raise CommandExecutionError(f"Unsupported HPC access_mode: {access_mode}")
 
-    scheduler_host = resolve_scheduler_host(config)
-    if not scheduler_host:
-        raise CommandExecutionError("HPC access_mode=ssh requires hpc.remote_host or hpc.scheduler_host")
-
-    remote_command = shlex.join(rendered)
-    ssh_command = resolve_ssh_command(config) + [
-        scheduler_host,
-        "sh",
-        "-c",
-        shlex.quote(remote_command),
-    ]
+    ssh_command = build_remote_command_argv(shlex.join(rendered), config=config)
     return subprocess.run(
         ssh_command,
         capture_output=True,

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import os
+import re
+import shlex
 import signal
 import shutil
 import subprocess
@@ -25,7 +28,7 @@ try:
     )
     from hpc import get_scheduler_adapter
     from hpc.admission import evaluate_admission
-    from hpc.base import resolve_access_mode, resolve_transfer_host
+    from hpc.base import build_remote_command_argv, resolve_access_mode, resolve_transfer_host
     from namelist_parser import read_namelist
     from project_state import (
         assert_mutation_allowed,
@@ -41,7 +44,7 @@ try:
         set_active_task,
         transition,
     )
-    from spec_utils import normalize_spec
+    from spec_utils import normalize_spec, parse_time
     from utils import posix_path, utc_now
     from wrf_data import prepare_data
     from wrf_run import (
@@ -85,7 +88,7 @@ except ImportError:  # pragma: no cover
     )
     from .hpc import get_scheduler_adapter
     from .hpc.admission import evaluate_admission
-    from .hpc.base import resolve_access_mode, resolve_transfer_host
+    from .hpc.base import build_remote_command_argv, resolve_access_mode, resolve_transfer_host
     from .namelist_parser import read_namelist
     from .project_state import (
         assert_mutation_allowed,
@@ -101,7 +104,7 @@ except ImportError:  # pragma: no cover
         set_active_task,
         transition,
     )
-    from .spec_utils import normalize_spec
+    from .spec_utils import normalize_spec, parse_time
     from .utils import posix_path, utc_now
     from .wrf_data import prepare_data
     from .wrf_run import (
@@ -171,6 +174,50 @@ WPS_SUBSTEP_LOG_NAMES = {
 RUN_SUBSTEP_LOG_NAMES = {
     "real": "wrf-run-real.log",
     "wrf": "wrf-run-wrf.log",
+}
+
+# ---------------------------------------------------------------------------
+# monitor subcommand (streams live progress events for the Monitor tool)
+# ---------------------------------------------------------------------------
+MONITOR_LOG_APPEAR_TIMEOUT_SECONDS = 120.0
+MONITOR_LOCAL_POLL_INTERVAL_SECONDS = 1.0
+MONITOR_REFRESH_BACKUP_EVERY_N_LOCAL = 10
+MONITOR_REFRESH_BACKUP_EVERY_N_HPC = 30
+MONITOR_SSH_RECONNECT_TRIES = 3
+MONITOR_SSH_RECONNECT_BACKOFF = (2.0, 4.0, 8.0)
+MONITOR_REMOTE_FILE_PROBE_INTERVAL_SECONDS = 2.0
+
+# rsl.out.0000 progress lines come in two forms; match both.
+#   "Timing for main: time 2024-07-20_00:10:48 on domain   1: ..." (no d01 prefix)
+#   "d01 2010-01-01_06:30:00 ..." (WRF domain print lines)
+_RSL_TIMESTAMP_RE = re.compile(
+    r"Timing for main:\s*time\s+(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2})"
+    r"|(?:d\d\d\s+)(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2})"
+)
+
+_WRF_SUCCESS_SIGNATURES = (
+    "SUCCESS COMPLETE WRF",
+    "SUCCESS COMPLETE",
+    "wrf: SUCCESS COMPLETE",
+)
+_WRF_FAILURE_SIGNATURES = (
+    "Killed",
+    "Segmentation",
+    "forrtl: severe",
+    "BAD RESPONSE",
+    "netCDF Error",
+    "Fatal",
+    "FATAL",
+    "ERROR: ",
+    "Backtrace:",
+    "application called MPI_Abort",
+)
+
+# Map a non-substep task step to its main log filename inside remote_log_dir.
+_STEP_MAIN_LOG_NAMES = {
+    "wrf-wps": "wrf-wps.log",
+    "wrf-run": "wrf-run.log",
+    "wrf-data": "wrf-data.log",
 }
 
 
@@ -1484,6 +1531,518 @@ def start_task(
     return payload
 
 
+# ---------------------------------------------------------------------------
+# monitor implementation
+# ---------------------------------------------------------------------------
+
+
+def _emit_event(text: str) -> None:
+    print(text, flush=True)
+
+
+def _scan_signature(line: str) -> tuple[str | None, str | None]:
+    """Return (kind, detail) where kind in {'success', 'failure', None}."""
+    upper = line.upper()
+    for sig in _WRF_SUCCESS_SIGNATURES:
+        if sig.upper() in upper:
+            return "success", sig
+    for sig in _WRF_FAILURE_SIGNATURES:
+        if sig in line or sig.upper() in upper:
+            return "failure", sig
+    return None, None
+
+
+def _extract_sim_time(line: str) -> _dt.datetime | None:
+    match = _RSL_TIMESTAMP_RE.search(line)
+    if not match:
+        return None
+    raw = match.group(1) or match.group(2)
+    try:
+        return parse_time(raw)
+    except ValueError:
+        return None
+
+
+def _percent_for(sim_time: _dt.datetime, start: _dt.datetime, end: _dt.datetime) -> int:
+    total = (end - start).total_seconds()
+    if total <= 0:
+        return 0
+    done = (sim_time - start).total_seconds()
+    return int(max(0, min(100, done / total * 100)))
+
+
+def _resolve_simulation_span(project_dir: Path) -> tuple[_dt.datetime, _dt.datetime] | None:
+    """Resolve (start, end) from simulation_spec.json, falling back to namelist.input."""
+    spec_path = project_dir / "simulation_spec.json"
+    if spec_path.exists():
+        try:
+            spec = load_json(spec_path)
+            timing = spec.get("timing", {}) or {}
+            start = parse_time(str(timing["start_time"]))
+            end = parse_time(str(timing["end_time"]))
+            if end > start:
+                return start, end
+        except Exception:
+            pass
+
+    namelist_path = project_dir / "wrf" / "namelist.input"
+    if not namelist_path.exists():
+        namelist_path = project_dir / "namelist.input"
+    if namelist_path.exists():
+        try:
+            nl = read_namelist(namelist_path)
+            tc = nl.get("time_control", {}) or {}
+
+            def _first(value: Any) -> Any:
+                return value[0] if isinstance(value, list) else value
+
+            if all(k in tc for k in ("start_year", "start_month", "start_day", "start_hour")) and all(
+                k in tc for k in ("end_year", "end_month", "end_day", "end_hour")
+            ):
+                start = _dt.datetime(
+                    int(_first(tc["start_year"])),
+                    int(_first(tc["start_month"])),
+                    int(_first(tc["start_day"])),
+                    int(_first(tc["start_hour"])),
+                )
+                end = _dt.datetime(
+                    int(_first(tc["end_year"])),
+                    int(_first(tc["end_month"])),
+                    int(_first(tc["end_day"])),
+                    int(_first(tc["end_hour"])),
+                )
+                if end > start:
+                    return start, end
+                run_days = int(_first(tc.get("run_days", 0)) or 0)
+                run_hours = int(_first(tc.get("run_hours", 0)) or 0)
+                if run_days or run_hours:
+                    return start, start + _dt.timedelta(hours=run_days * 24 + run_hours)
+        except Exception:
+            pass
+    return None
+
+
+def _infer_substep_from_log_name(name: str) -> str | None:
+    for mapping in (WPS_SUBSTEP_LOG_NAMES, RUN_SUBSTEP_LOG_NAMES):
+        for substep, filename in mapping.items():
+            if filename == name:
+                return substep
+    return None
+
+
+def _load_rendered_job(project_dir: Path, task: dict[str, Any]) -> dict[str, Any] | None:
+    rendered_path = task_dir(project_dir, str(task.get("id") or "")) / "rendered_job.json"
+    if not rendered_path.exists():
+        return None
+    try:
+        return load_json(rendered_path)
+    except Exception:
+        return None
+
+
+def _resolve_monitor_log_and_mode(
+    state: dict[str, Any],
+    task: dict[str, Any],
+    substep: str | None,
+    *,
+    backend: str,
+) -> tuple[Path | str, str]:
+    """Return (log_path, mode) where mode in {'percentage', 'raw'}.
+
+    For local backend log_path is a Path; for hpc backend it's a remote POSIX string.
+    """
+    step = str(task.get("step") or "")
+    is_local = backend == "local"
+
+    if is_local:
+        if substep is not None:
+            log_path = resolve_substep_log_path(state, substep)
+            effective_substep = substep
+        else:
+            log_path = resolve_local_task_log_path(state, task, require_content=False)
+            effective_substep = _infer_substep_from_log_name(log_path.name)
+            if effective_substep is None and step == "wrf-run":
+                effective_substep = "wrf"
+        # For the wrf substep, the real per-timestep log is rsl.out.0000, not the wrapper log.
+        if effective_substep == "wrf" and log_path.name != "rsl.out.0000":
+            wrf_dir = Path(state["paths"]["wrf_dir"])
+            rsl = wrf_dir / "rsl.out.0000"
+            if rsl.exists() or not log_path.exists():
+                log_path = rsl
+        mode = "percentage" if effective_substep == "wrf" else "raw"
+        return log_path, mode
+
+    # hpc backend (any non-local backend): derive remote path from rendered_job.json.
+    project_dir = Path(state["paths"]["project_root"])
+    rendered = _load_rendered_job(project_dir, task)
+    if rendered is None:
+        raise RuntimeError("no_rendered_job")
+    remote_project_dir = str(rendered.get("remote_project_dir") or "").rstrip("/")
+    remote_log_dir = str(rendered.get("remote_log_dir") or "").rstrip("/")
+    if not remote_project_dir:
+        raise RuntimeError("no_rendered_job")
+
+    if substep == "wrf" or (substep is None and step == "wrf-run"):
+        remote_path = f"{remote_project_dir}/wrf/rsl.out.0000"
+        return remote_path, "percentage"
+    if substep is not None:
+        filename = WPS_SUBSTEP_LOG_NAMES.get(substep) or RUN_SUBSTEP_LOG_NAMES.get(substep)
+        if filename is None:
+            raise RuntimeError(f"unsupported_substep:{substep}")
+        if not remote_log_dir:
+            raise RuntimeError("no_rendered_job")
+        return f"{remote_log_dir}/{filename}", "raw"
+    # no substep, non-wrf-run HPC task
+    if not remote_log_dir:
+        raise RuntimeError("no_rendered_job")
+    main_log = _STEP_MAIN_LOG_NAMES.get(step)
+    if main_log is None:
+        raise RuntimeError(f"unsupported_step:{step}")
+    return f"{remote_log_dir}/{main_log}", "raw"
+
+
+def _compile_raw_filter(filter_spec: str) -> tuple[re.Pattern | None, bool]:
+    """Compile a RAW-mode filter spec. Returns (regex_or_None, emit_all_lines)."""
+    if filter_spec == "raw":
+        return None, True
+    if filter_spec == "preset" or not filter_spec:
+        return None, False  # preset = only signatures, handled in _emit_line
+    try:
+        return re.compile(filter_spec), False
+    except re.error as exc:
+        raise ValueError(f"bad_filter_regex: {exc}") from exc
+
+
+def _emit_line(
+    line: str,
+    *,
+    mode: str,
+    start: _dt.datetime | None,
+    end: _dt.datetime | None,
+    last_pct_ref: list[int],
+    raw_filter_regex: re.Pattern | None,
+    raw_emit_all: bool,
+) -> int | None:
+    """Process one log line. Return exit code on terminal event, None to continue."""
+    kind, detail = _scan_signature(line)
+    if kind == "success":
+        if mode == "percentage" and start is not None and end is not None and last_pct_ref[0] < 100:
+            last_pct_ref[0] = 100
+            _emit_event(f"100%  {end.strftime('%Y-%m-%d_%H:%M:%S')}")
+        _emit_event("SUCCESS")
+        return 0
+    if kind == "failure":
+        _emit_event(f"FAILED {detail}")
+        return 1
+
+    if mode == "percentage":
+        if start is None or end is None:
+            return None
+        sim_time = _extract_sim_time(line)
+        if sim_time is None:
+            return None
+        pct = _percent_for(sim_time, start, end)
+        if pct > last_pct_ref[0]:
+            last_pct_ref[0] = pct
+            _emit_event(f"{pct}%  {sim_time.strftime('%Y-%m-%d_%H:%M:%S')}")
+        return None
+
+    # RAW mode
+    if raw_emit_all:
+        _emit_event(line)
+    elif raw_filter_regex is not None:
+        if raw_filter_regex.search(line):
+            _emit_event(line)
+    # preset (default): signatures only, already handled above.
+    return None
+
+
+def _wait_for_local_log(log_path: Path, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while not (log_path.exists() and log_path.is_file()):
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.5)
+    return True
+
+
+def _stream_local_log(
+    log_path: Path,
+    *,
+    mode: str,
+    start: _dt.datetime | None,
+    end: _dt.datetime | None,
+    project_json: Path,
+    task: dict[str, Any],
+    refresh_backup_every_n: int,
+    log_appear_timeout: float,
+    raw_filter_regex: re.Pattern | None,
+    raw_emit_all: bool,
+) -> int:
+    if not _wait_for_local_log(log_path, log_appear_timeout):
+        _emit_event(f"FAILED log_not_found {posix_path(log_path)}")
+        return 1
+
+    last_pct_ref = [-1]
+    offset = 0
+    buf = ""
+    poll_count = 0
+    while True:
+        try:
+            with log_path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                if size > offset:
+                    handle.seek(offset)
+                    data = handle.read(size - offset)
+                    offset = size
+                    buf += data.decode("utf-8", errors="replace")
+        except OSError:
+            pass
+
+        if "\n" in buf:
+            parts = buf.split("\n")
+            buf = parts[-1]
+            for line in parts[:-1]:
+                rc = _emit_line(
+                    line.rstrip("\r"),
+                    mode=mode,
+                    start=start,
+                    end=end,
+                    last_pct_ref=last_pct_ref,
+                    raw_filter_regex=raw_filter_regex,
+                    raw_emit_all=raw_emit_all,
+                )
+                if rc is not None:
+                    return rc
+
+        poll_count += 1
+        if poll_count % refresh_backup_every_n == 0:
+            try:
+                _, refreshed = refresh_local_task(project_json, dict(task))
+                task.update(refreshed)
+                if task.get("state") in TERMINAL_TASK_STATES:
+                    _emit_event(f"ENDED {task['state']}")
+                    return 0 if task["state"] == "completed" else 1
+            except Exception:
+                pass
+        time.sleep(MONITOR_LOCAL_POLL_INTERVAL_SECONDS)
+
+
+def _wait_for_remote_file(remote_path: str, *, config: dict[str, Any], timeout: float) -> bool:
+    deadline = time.time() + timeout
+    probe = f"test -f {shlex.quote(remote_path)} && echo ok"
+    while True:
+        try:
+            completed = subprocess.run(
+                build_remote_command_argv(probe, config=config),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if completed.stdout.strip() == "ok":
+                return True
+        except Exception:
+            pass
+        if time.time() >= deadline:
+            return False
+        time.sleep(MONITOR_REMOTE_FILE_PROBE_INTERVAL_SECONDS)
+
+
+def _start_remote_tail(remote_path: str, *, config: dict[str, Any], from_line: int = 1) -> subprocess.Popen:
+    cmd = f"tail -n +{from_line} -F {shlex.quote(remote_path)}"
+    argv = build_remote_command_argv(cmd, config=config)
+    return subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+
+def _remote_line_count(remote_path: str, *, config: dict[str, Any]) -> int:
+    """Best-effort current line count of the remote file (for reconnect offset)."""
+    try:
+        completed = subprocess.run(
+            build_remote_command_argv(f"wc -l < {shlex.quote(remote_path)}", config=config),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0:
+            return int(completed.stdout.strip() or 0)
+    except Exception:
+        pass
+    return 0
+
+
+def _mark_task_needs_intervention(project_dir: Path, task: dict[str, Any], reason: str) -> None:
+    try:
+        task["monitor_flag"] = "needs_intervention"
+        task["monitor_reason"] = reason
+        save_task(task)
+    except Exception:
+        pass
+
+
+def _stream_hpc_log(
+    remote_path: str,
+    *,
+    config: dict[str, Any],
+    mode: str,
+    start: _dt.datetime | None,
+    end: _dt.datetime | None,
+    project_json: Path,
+    task: dict[str, Any],
+    config_path: Path,
+    refresh_backup_every_n: int,
+    log_appear_timeout: float,
+    raw_filter_regex: re.Pattern | None,
+    raw_emit_all: bool,
+) -> int:
+    if not _wait_for_remote_file(remote_path, config=config, timeout=log_appear_timeout):
+        _emit_event(f"FAILED remote_log_not_found {remote_path}")
+        return 1
+
+    project_dir = Path(load_project(project_json)["paths"]["project_root"])
+    last_pct_ref = [-1]
+    lines_read = 0
+    poll_count = 0
+    from_line = 1
+    proc = _start_remote_tail(remote_path, config=config, from_line=from_line)
+    reconnect_attempts = 0
+
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                rc = proc.poll()
+                if rc is not None:
+                    # ssh/tail died; attempt reconnect up to MONITOR_SSH_RECONNECT_TRIES.
+                    if reconnect_attempts < MONITOR_SSH_RECONNECT_TRIES:
+                        backoff = MONITOR_SSH_RECONNECT_BACKOFF[reconnect_attempts]
+                        reconnect_attempts += 1
+                        time.sleep(backoff)
+                        # Resume from the line after the last one we read.
+                        from_line = lines_read + 1
+                        try:
+                            proc = _start_remote_tail(remote_path, config=config, from_line=from_line)
+                        except Exception:
+                            pass
+                        continue
+                    # Reconnect exhausted: pause task for human intervention.
+                    _mark_task_needs_intervention(project_dir, task, "ssh_disconnected")
+                    _emit_event("INTERVENTION_NEEDED ssh_disconnected")
+                    return 1
+                continue
+
+            lines_read += 1
+            rc = _emit_line(
+                line.rstrip("\r\n"),
+                mode=mode,
+                start=start,
+                end=end,
+                last_pct_ref=last_pct_ref,
+                raw_filter_regex=raw_filter_regex,
+                raw_emit_all=raw_emit_all,
+            )
+            if rc is not None:
+                return rc
+
+            poll_count += 1
+            if poll_count % refresh_backup_every_n == 0:
+                try:
+                    _, refreshed = refresh_hpc_task(project_json, dict(task), Path(config_path))
+                    task.update(refreshed)
+                    if task.get("state") in TERMINAL_TASK_STATES:
+                        _emit_event(f"ENDED {task['state']}")
+                        return 0 if task["state"] == "completed" else 1
+                except Exception:
+                    pass
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+
+
+def monitor_task(
+    project_name: str,
+    *,
+    task_id: str | None = None,
+    substep: str | None = None,
+    runs_dir: Path | str = "runs",
+    config_path: Path | str = "config/wrf_env.json",
+    filter: str = "preset",
+    log_appear_timeout: float = MONITOR_LOG_APPEAR_TIMEOUT_SECONDS,
+) -> int:
+    runs_dir = Path(runs_dir)
+    config_path = Path(config_path)
+    project_dir = project_root(runs_dir, project_name)
+    project_json = project_json_path(runs_dir, project_name)
+    try:
+        state = load_project(project_json)
+    except FileNotFoundError:
+        _emit_event("FAILED no_project")
+        return 2
+    task = find_task(project_dir, state, task_id)
+    if task is None:
+        _emit_event("FAILED no_task")
+        return 2
+
+    backend = str(task.get("backend") or "local").lower()
+    try:
+        log_path, mode = _resolve_monitor_log_and_mode(state, task, substep, backend=backend)
+    except RuntimeError as exc:
+        _emit_event(f"FAILED {exc}")
+        return 1
+
+    start: _dt.datetime | None = None
+    end: _dt.datetime | None = None
+    if mode == "percentage":
+        span = _resolve_simulation_span(project_dir)
+        if span is None:
+            _emit_event("FAILED no_span")
+            return 1
+        start, end = span
+
+    raw_filter_regex: re.Pattern | None = None
+    raw_emit_all = False
+    if mode == "raw":
+        try:
+            raw_filter_regex, raw_emit_all = _compile_raw_filter(filter)
+        except ValueError as exc:
+            _emit_event(f"FAILED {exc}")
+            return 1
+
+    if backend != "local":
+        config = load_json(config_path)
+        return _stream_hpc_log(
+            str(log_path),
+            config=config,
+            mode=mode,
+            start=start,
+            end=end,
+            project_json=project_json,
+            task=task,
+            config_path=config_path,
+            refresh_backup_every_n=MONITOR_REFRESH_BACKUP_EVERY_N_HPC,
+            log_appear_timeout=log_appear_timeout,
+            raw_filter_regex=raw_filter_regex,
+            raw_emit_all=raw_emit_all,
+        )
+
+    return _stream_local_log(
+        Path(log_path),
+        mode=mode,
+        start=start,
+        end=end,
+        project_json=project_json,
+        task=task,
+        refresh_backup_every_n=MONITOR_REFRESH_BACKUP_EVERY_N_LOCAL,
+        log_appear_timeout=log_appear_timeout,
+        raw_filter_regex=raw_filter_regex,
+        raw_emit_all=raw_emit_all,
+    )
+
+
 def status_task(
     project_name: str,
     *,
@@ -1752,6 +2311,24 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--runs-dir", default="runs")
     collect.add_argument("--config", default="config/wrf_env.json")
 
+    monitor = subparsers.add_parser("monitor")
+    monitor.add_argument("--project-name", required=True)
+    monitor.add_argument("--task-id")
+    monitor.add_argument("--runs-dir", default="runs")
+    monitor.add_argument("--config", default="config/wrf_env.json")
+    monitor.add_argument("--substep", choices=sorted(SUPPORTED_SUBSTEP_NAMES))
+    monitor.add_argument(
+        "--filter",
+        default="preset",
+        help="RAW-mode line filter: preset|raw|<regex> (ignored in percentage mode)",
+    )
+    monitor.add_argument(
+        "--log-appear-timeout",
+        type=float,
+        default=MONITOR_LOG_APPEAR_TIMEOUT_SECONDS,
+        help="Seconds to wait for the log file to appear before failing",
+    )
+
     worker = subparsers.add_parser("_worker")
     worker.add_argument("--project-name", required=True)
     worker.add_argument("--runs-dir", required=True)
@@ -1800,6 +2377,16 @@ def main() -> int:
     if args.command == "collect":
         print(json.dumps(collect_task(args.project_name, task_id=args.task_id, runs_dir=args.runs_dir, config_path=args.config), indent=2))
         return 0
+    if args.command == "monitor":
+        return monitor_task(
+            args.project_name,
+            task_id=args.task_id,
+            substep=args.substep,
+            runs_dir=args.runs_dir,
+            config_path=args.config,
+            filter=args.filter,
+            log_appear_timeout=args.log_appear_timeout,
+        )
     if args.command == "_worker":
         return worker_main(args.project_name, Path(args.runs_dir), args.task_id)
     raise ValueError(f"Unsupported command: {args.command}")

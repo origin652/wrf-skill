@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.hpc import get_scheduler_adapter, register_scheduler_adapter
-from scripts.hpc.base import HpcSchedulerAdapter
+from scripts.hpc.base import CommandExecutionError, HpcSchedulerAdapter, build_remote_command_argv
 
 
 class DummyAdapter(HpcSchedulerAdapter):
@@ -365,6 +365,61 @@ class HpcAdapterTests(unittest.TestCase):
         register_scheduler_adapter("dummy-test", DummyAdapter)
         adapter = get_scheduler_adapter("dummy-test")
         self.assertIsInstance(adapter, DummyAdapter)
+
+
+class BuildRemoteCommandArgvTests(unittest.TestCase):
+    def slurm_config(self, **kwargs) -> dict:
+        hpc = {
+            "enabled": True,
+            "backend": "slurm",
+            "access_mode": "ssh",
+            "remote_base_dir": "/scratch/user/wrf_runs",
+            "scheduler_host": "login01.cluster",
+            "submit_cmd": "sbatch",
+            "status_cmd": "squeue -j {job_id}",
+            "cancel_cmd": "scancel {job_id}",
+            "scheduler_ssh_cmd": "ssh -o BatchMode=yes",
+        }
+        for key, value in kwargs.items():
+            if value is None:
+                hpc.pop(key, None)
+            else:
+                hpc[key] = value
+        return {"hpc": hpc}
+
+    def test_login_mode_splits_command_locally(self) -> None:
+        config = self.slurm_config(access_mode="login", scheduler_ssh_cmd=None)
+        argv = build_remote_command_argv("tail -n +1 -F /tmp/x.log", config=config)
+        self.assertEqual(argv, ["tail", "-n", "+1", "-F", "/tmp/x.log"])
+
+    def test_ssh_mode_wraps_with_host_and_sh_c(self) -> None:
+        config = self.slurm_config()
+        argv = build_remote_command_argv("tail -n +1 -F /tmp/x.log", config=config)
+        self.assertEqual(argv[:3], ["ssh", "-o", "BatchMode=yes"])
+        self.assertEqual(argv[-4], "login01.cluster")
+        self.assertEqual(argv[-3], "sh")
+        self.assertEqual(argv[-2], "-c")
+        # shlex.quote wraps the remote command in single quotes.
+        self.assertEqual(argv[-1], "'tail -n +1 -F /tmp/x.log'")
+
+    def test_ssh_mode_carries_identity_and_port_flags(self) -> None:
+        config = self.slurm_config(scheduler_ssh_cmd="ssh -i /key -p 2222")
+        argv = build_remote_command_argv("wc -l < /tmp/x.log", config=config)
+        self.assertIn("-i", argv)
+        self.assertIn("/key", argv)
+        self.assertIn("-p", argv)
+        self.assertIn("2222", argv)
+        self.assertEqual(argv[-1], "'wc -l < /tmp/x.log'")
+
+    def test_ssh_mode_missing_host_raises(self) -> None:
+        config = self.slurm_config(scheduler_host=None)
+        with self.assertRaises(CommandExecutionError):
+            build_remote_command_argv("true", config=config)
+
+    def test_unsupported_access_mode_raises(self) -> None:
+        config = self.slurm_config(access_mode="weird-mode")
+        with self.assertRaises(CommandExecutionError):
+            build_remote_command_argv("true", config=config)
 
 
 if __name__ == "__main__":

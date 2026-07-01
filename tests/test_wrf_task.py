@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import shutil
 import stat
@@ -17,6 +19,7 @@ from scripts.wrf_task import (
     collect_task,
     create_task_metadata,
     logs_task,
+    monitor_task,
     save_task,
     start_task,
     status_task,
@@ -825,6 +828,294 @@ class WrfTaskTests(unittest.TestCase):
         self.assertEqual(state["status"], "completed")
         self.assertEqual(state["artifacts"]["wrfout_files"], [])
         self.assertEqual(state["artifacts"]["plots"], [plot_path.as_posix()])
+
+
+class MonitorTaskTests(unittest.TestCase):
+    def init_configured_project(self, runs_dir: Path, *, run_mode: str = "local", config_path: Path = CONFIG_PATH) -> None:
+        initialize_project(
+            "demo",
+            runs_dir=runs_dir,
+            config_path=config_path,
+            templates_dir=TEMPLATES_DIR,
+            dry_run=False,
+            skip_env_check=True,
+        )
+        configure_project(
+            "demo",
+            runs_dir=runs_dir,
+            config_path=config_path,
+            domains_config=DOMAINS_CONFIG,
+            physics_config=PHYSICS_CONFIG,
+            domain_presets=["east_china"],
+            physics_preset="tropical_cyclone",
+            start_time="2024-07-20_00:00:00",
+            end_time="2024-07-20_01:00:00",
+            run_mode=run_mode,
+            dry_run=False,
+        )
+
+    def _capture_monitor(self, *args, **kwargs) -> tuple[int, str]:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = monitor_task(*args, **kwargs)
+        return rc, buf.getvalue()
+
+    def _make_tail_proc(self, lines):
+        """A fake Popen whose readline() yields the given lines then EOFs, with poll()=None until EOF then 0."""
+        proc = Mock()
+        proc._lines = list(lines)
+        proc._exhausted = False
+
+        class _Stdout:
+            def __init__(self) -> None:
+                self._lines = list(lines)
+                self._exhausted = False
+
+            def readline(self):
+                if self._lines:
+                    return self._lines.pop(0) + "\n"
+                self._exhausted = True
+                return ""
+
+        proc.stdout = _Stdout()
+        proc._stdout = proc.stdout
+
+        def _poll():
+            return 0 if proc.stdout._exhausted else None
+
+        proc.poll = Mock(side_effect=_poll)
+        proc.terminate = Mock()
+        proc.wait = Mock()
+        proc.kill = Mock()
+        return proc
+
+    def _make_dead_proc(self):
+        """A fake Popen that is already dead (EOF immediately, poll()=1)."""
+        proc = Mock()
+
+        class _Stdout:
+            def readline(self):
+                return ""
+
+        proc.stdout = _Stdout()
+
+        def _poll():
+            return 1
+
+        proc.poll = Mock(side_effect=_poll)
+        proc.terminate = Mock()
+        proc.wait = Mock()
+        proc.kill = Mock()
+        return proc
+
+    def test_monitor_emits_percentage_events_from_rsl_out(self) -> None:
+        runs_dir = make_test_dir("_test_monitor_percentage")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        project_dir = runs_dir / "demo"
+        project_json = project_dir / "project.json"
+        task = create_task_metadata(
+            "demo", "wrf-run", "local", project_dir, "task-monitor-pct",
+            runs_dir=runs_dir, config_path=CONFIG_PATH, params={},
+        )
+        task["pid"] = 12345
+        task["state"] = "running"
+        save_task(task)
+        store_active_task(project_json, "wrf-run", task)
+        Path(task["log_path"]).write_text("", encoding="utf-8")
+
+        # Local mode keeps the requested 1-hour span (00:00 -> 01:00 = 3600s).
+        rsl = project_dir / "wrf" / "rsl.out.0000"
+        lines = []
+        # Step every 36 seconds across the hour -> ~100 whole-percent crossings.
+        for secs in range(0, 3601, 36):
+            ts = f"2024-07-20_00:{secs // 60:02d}:{secs % 60:02d}"
+            lines.append(f"Timing for main: time {ts} on domain   1:    3.0 elapsed seconds")
+        lines.append("SUCCESS COMPLETE WRF")
+        rsl.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        with patch("scripts.wrf_task.time.sleep", lambda _: None), \
+             patch("scripts.wrf_task.refresh_local_task", lambda pj, t: (load_project(pj), t)):
+            rc, out = self._capture_monitor("demo", task_id="task-monitor-pct", runs_dir=runs_dir)
+
+        self.assertEqual(rc, 0)
+        # Whole-percent events are monotonically increasing with no duplicates.
+        pcts = [int(ln.split("%")[0]) for ln in out.splitlines() if "%  " in ln and ln.split("%")[0].isdigit()]
+        self.assertEqual(pcts, sorted(set(pcts)))
+        self.assertIn("0%  2024-07-20_00:00:00", out)
+        self.assertIn("100%  2024-07-20_01:00:00", out)
+        self.assertIn("SUCCESS", out)
+
+    def test_monitor_raw_mode_preset_vs_raw_vs_regex(self) -> None:
+        runs_dir = make_test_dir("_test_monitor_raw")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        project_dir = runs_dir / "demo"
+        project_json = project_dir / "project.json"
+        task = create_task_metadata(
+            "demo", "wrf-wps", "local", project_dir, "task-monitor-raw",
+            runs_dir=runs_dir, config_path=CONFIG_PATH, params={},
+        )
+        task["pid"] = 12345
+        task["state"] = "running"
+        save_task(task)
+        store_active_task(project_json, "wrf-wps", task)
+        Path(task["log_path"]).write_text("", encoding="utf-8")
+
+        geo_log = project_dir / "logs" / "wrf-wps-geogrid.log"
+        body = [f"ordinary line {i}" for i in range(50)] + ["Fatal error in geogrid"]
+        geo_log.write_text("\n".join(body) + "\n", encoding="utf-8")
+
+        with patch("scripts.wrf_task.time.sleep", lambda _: None), \
+             patch("scripts.wrf_task.refresh_local_task", lambda pj, t: (load_project(pj), t)):
+            rc_preset, out_preset = self._capture_monitor(
+                "demo", task_id="task-monitor-raw", runs_dir=runs_dir, substep="geogrid", filter="preset")
+            rc_raw, out_raw = self._capture_monitor(
+                "demo", task_id="task-monitor-raw", runs_dir=runs_dir, substep="geogrid", filter="raw")
+
+        self.assertNotEqual(rc_preset, 0)
+        self.assertIn("FAILED Fatal", out_preset)
+        self.assertNotIn("ordinary line", out_preset)
+
+        self.assertNotEqual(rc_raw, 0)
+        self.assertIn("ordinary line 0", out_raw)
+        self.assertIn("FAILED Fatal", out_raw)
+
+    def test_monitor_no_task_returns_nonzero(self) -> None:
+        runs_dir = make_test_dir("_test_monitor_no_task")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        rc, out = self._capture_monitor("demo", runs_dir=runs_dir)
+        self.assertEqual(rc, 2)
+        self.assertIn("FAILED no_task", out)
+
+    def test_monitor_missing_project_returns_nonzero(self) -> None:
+        runs_dir = make_test_dir("_test_monitor_no_project")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        # Note: no project initialized for "demo" under this runs_dir.
+        rc, out = self._capture_monitor("demo", runs_dir=runs_dir)
+        self.assertEqual(rc, 2)
+        self.assertIn("FAILED no_project", out)
+
+    def test_monitor_log_appear_timeout(self) -> None:
+        runs_dir = make_test_dir("_test_monitor_timeout")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir)
+
+        project_dir = runs_dir / "demo"
+        project_json = project_dir / "project.json"
+        task = create_task_metadata(
+            "demo", "wrf-wps", "local", project_dir, "task-monitor-timeout",
+            runs_dir=runs_dir, config_path=CONFIG_PATH, params={},
+        )
+        task["pid"] = 12345
+        task["state"] = "running"
+        save_task(task)
+        store_active_task(project_json, "wrf-wps", task)
+        Path(task["log_path"]).write_text("", encoding="utf-8")
+        # Do NOT create the geogrid log; expect log_not_found after timeout.
+
+        with patch("scripts.wrf_task.time.sleep", lambda _: None), \
+             patch("scripts.wrf_task.refresh_local_task", lambda pj, t: (load_project(pj), t)):
+            rc, out = self._capture_monitor(
+                "demo", task_id="task-monitor-timeout", runs_dir=runs_dir,
+                substep="geogrid", log_appear_timeout=0.0)
+
+        self.assertNotEqual(rc, 0)
+        self.assertIn("FAILED log_not_found", out)
+
+    def test_monitor_hpc_ssh_tail_uses_rendered_job_remote_path(self) -> None:
+        runs_dir = make_test_dir("_test_monitor_hpc")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir, run_mode="hpc")
+
+        project_dir = runs_dir / "demo"
+        project_json = project_dir / "project.json"
+        task = create_task_metadata(
+            "demo", "wrf-run", "slurm", project_dir, "task-monitor-hpc",
+            runs_dir=runs_dir, config_path=CONFIG_PATH, params={},
+        )
+        task["job_id"] = "12345"
+        task["state"] = "running"
+        save_task(task)
+        store_active_task(project_json, "wrf-run", task)
+        (task_dir(project_dir, "task-monitor-hpc") / "rendered_job.json").write_text(
+            json.dumps({
+                "remote_project_dir": "/scratch/demo",
+                "remote_log_dir": "/scratch/demo/logs",
+            }, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        # configure_project adjusts end_time to align with the forcing interval (3h),
+        # so a 1-hour request becomes a 6-hour span (00:00 -> 06:00).
+        rsl_lines = [
+            "Timing for main: time 2024-07-20_00:06:00 on domain   1:    3.0 elapsed seconds",
+            "Timing for main: time 2024-07-20_00:30:00 on domain   1:    3.0 elapsed seconds",
+            "SUCCESS COMPLETE WRF",
+        ]
+
+        fake_proc = self._make_tail_proc(rsl_lines)
+
+        seen_argv = []
+
+        def fake_build_argv(cmd, *, config):
+            seen_argv.append(cmd)
+            return ["ssh", "host", "sh", "-c", cmd]
+
+        with patch("scripts.wrf_task.subprocess.run",
+                   return_value=subprocess.CompletedProcess(["ssh"], 0, "ok", "")), \
+             patch("scripts.wrf_task.subprocess.Popen", return_value=fake_proc), \
+             patch("scripts.wrf_task.build_remote_command_argv", side_effect=fake_build_argv), \
+             patch("scripts.wrf_task.refresh_hpc_task", lambda pj, t, cp: (load_project(pj), t)), \
+             patch("scripts.wrf_task.time.sleep", lambda _: None):
+            rc, out = self._capture_monitor("demo", task_id="task-monitor-hpc", runs_dir=runs_dir)
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(any("tail -n +1 -F /scratch/demo/wrf/rsl.out.0000" in c for c in seen_argv))
+        self.assertIn("SUCCESS", out)
+        self.assertIn("100%  2024-07-20_06:00:00", out)
+        # 6min/6h = 1%, 30min/6h = 8% — both whole-percent events must appear.
+        self.assertIn("1%  2024-07-20_00:06:00", out)
+        self.assertIn("8%  2024-07-20_00:30:00", out)
+
+    def test_monitor_hpc_reconnect_then_intervention(self) -> None:
+        runs_dir = make_test_dir("_test_monitor_reconnect")
+        self.addCleanup(lambda: shutil.rmtree(runs_dir, ignore_errors=True))
+        self.init_configured_project(runs_dir, run_mode="hpc")
+
+        project_dir = runs_dir / "demo"
+        project_json = project_dir / "project.json"
+        task = create_task_metadata(
+            "demo", "wrf-run", "slurm", project_dir, "task-monitor-reconnect",
+            runs_dir=runs_dir, config_path=CONFIG_PATH, params={},
+        )
+        task["job_id"] = "12345"
+        task["state"] = "running"
+        save_task(task)
+        store_active_task(project_json, "wrf-run", task)
+        (task_dir(project_dir, "task-monitor-reconnect") / "rendered_job.json").write_text(
+            json.dumps({"remote_project_dir": "/scratch/demo", "remote_log_dir": "/scratch/demo/logs"}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        # Each Popen returns a process whose stdout immediately EOFs and poll()=1 (dead).
+        with patch("scripts.wrf_task.subprocess.run",
+                   return_value=subprocess.CompletedProcess(["ssh"], 0, "ok", "")), \
+             patch("scripts.wrf_task.subprocess.Popen", side_effect=lambda *a, **k: self._make_dead_proc()), \
+             patch("scripts.wrf_task.build_remote_command_argv", side_effect=lambda cmd, *, config: ["ssh", "host", "sh", "-c", cmd]), \
+             patch("scripts.wrf_task.time.sleep", lambda _: None), \
+             patch("scripts.wrf_task.refresh_hpc_task", lambda pj, t, cp: (load_project(pj), t)):
+            rc, out = self._capture_monitor("demo", task_id="task-monitor-reconnect", runs_dir=runs_dir)
+
+        self.assertNotEqual(rc, 0)
+        self.assertIn("INTERVENTION_NEEDED ssh_disconnected", out)
+        refreshed = json.loads(task_json_path(project_dir, "task-monitor-reconnect").read_text(encoding="utf-8"))
+        self.assertEqual(refreshed.get("monitor_flag"), "needs_intervention")
+        self.assertEqual(refreshed.get("monitor_reason"), "ssh_disconnected")
 
 
 if __name__ == "__main__":

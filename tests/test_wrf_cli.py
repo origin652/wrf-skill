@@ -161,6 +161,47 @@ class WrfCliTests(unittest.TestCase):
             ],
         )
 
+    def test_monitor_forwards_to_wrf_task_monitor(self) -> None:
+        with patch(
+            "scripts.wrf.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0),
+        ) as mocked_run:
+            exit_code = wrf.main(["monitor", "--project-name", "demo", "--substep", "wrf"])
+
+        self.assertEqual(exit_code, 0)
+        forwarded = mocked_run.call_args.args[0]
+        self.assertEqual(
+            forwarded,
+            [
+                sys.executable,
+                str(Path(wrf.__file__).resolve().parent / "wrf_task.py"),
+                "monitor",
+                "--project-name",
+                "demo",
+                "--substep",
+                "wrf",
+            ],
+        )
+
+    def test_help_monitor_forwards_help(self) -> None:
+        with patch(
+            "scripts.wrf.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0),
+        ) as mocked_run:
+            exit_code = wrf.main(["help", "monitor"])
+
+        self.assertEqual(exit_code, 0)
+        forwarded = mocked_run.call_args.args[0]
+        self.assertEqual(
+            forwarded,
+            [
+                sys.executable,
+                str(Path(wrf.__file__).resolve().parent / "wrf_task.py"),
+                "monitor",
+                "--help",
+            ],
+        )
+
     def test_top_level_help_lists_preferred_entry(self) -> None:
         buffer = io.StringIO()
         with redirect_stdout(buffer):

@@ -17,6 +17,7 @@ COMMAND_HELP = {
     "run": "Start the async WRF task.",
     "status": "Read the current task state.",
     "logs": "Read the current task logs.",
+    "monitor": "Stream live progress events for the current task (one per line; designed for the Monitor tool).",
     "cancel": "Cancel the current task.",
     "collect": "Collect terminal HPC outputs back into project state (lightweight by default for wrf-run).",
     "post": "Run post-processing for a project. HPC wrf-run already post-processes remotely by default.",
@@ -32,6 +33,7 @@ TASK_STEP_COMMANDS = {
 TASK_ACTION_COMMANDS = {
     "status": "status",
     "logs": "logs",
+    "monitor": "monitor",
     "cancel": "cancel",
     "collect": "collect",
 }
@@ -97,6 +99,7 @@ def print_help() -> None:
         "run",
         "status",
         "logs",
+        "monitor",
         "cancel",
         "collect",
         "post",
